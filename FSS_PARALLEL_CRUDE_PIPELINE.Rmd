@@ -1,0 +1,117 @@
+#######################################
+# load modules
+module load gcc/12.1.0
+module load plink/2.0
+#######################################
+
+
+
+#######################################
+# setting p-value threshold (subtype is set in loops below)
+p_thresh_index=1
+
+# code to retrieve the p-value thresholds (numerical and str form for our thresholds)
+array_p_thresh_val="0.05 0.01 0.001 0.0001 0.00001 0.000001 0.0000001 0.00000001"
+array_p_thresh_str="0.05 0.01 0.001 1e04 1e05 1e06 1e07 1e08"
+p_thresh_val=`echo ${array_p_thresh_val} | cut -d" " -f${p_thresh_index}`
+p_thresh_str=`echo ${array_p_thresh_str} | cut -d" " -f${p_thresh_index}`
+echo "Initializing Forward Stepwise Selection Method for P-value Threshold of:" ${p_thresh_val}
+#######################################
+
+
+
+#######################################
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  # setting working directory and printing out subtype
+  cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/tmp/${subtype}
+  echo ${subtype}
+  
+  ##########
+  # STEP 1 #
+  ##########
+  # creating SNP lists for each of our 5 Mb windows
+  Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/FSS_LARGE_PARALLEL_STEP_1.R ${p_thresh_val} ${subtype}
+  
+  ##########
+  # STEP 2 #
+  ##########
+  # running FSS + LD clumping on each of the 5 Mb windows and outputting the jobids to a file
+  for j in CHROM_WINDOW_SNP_LIST_pthresh_${p_thresh_str}_*.txt
+  do
+    sbatch --export=ARGS1=${p_thresh_val},ARGS2=${subtype},ARGS3=${j} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/FSS_LARGE_PARALLEL_STEP_2.sh
+  done
+done
+#######################################
+
+
+
+#######################################
+# check if jobs finished successfully
+squeue -u jll1 | grep "FSS" | wc -l
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/tmp
+for path1 in OVERALL ERPOS ERNEG TNBC
+do
+  cd $path1
+  echo $path1
+  ls CHROM_WINDOW_SNP_LIST_pthresh_${p_thresh_str}* | wc -l
+  ls SELECTION_1_SNP_LIST_CHROM_WINDOW_SNP_LIST_pthresh_${p_thresh_str}* | wc -l
+  cd ..
+done
+#######################################
+
+
+
+#######################################
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  # setting working directory and printing out subtype
+  cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/tmp/${subtype}
+  echo ${subtype}
+  
+  ##########
+  # STEP 3 #
+  ##########
+  Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/FSS_LARGE_PARALLEL_STEP_3.R ${p_thresh_val} ${subtype}
+  
+  ##########
+  # STEP 4 #
+  ##########
+  for j in OFFSET_CHROM_WINDOW_SNP_LIST_pthresh_${p_thresh_str}_*.txt
+  do
+    sbatch  --export=ARGS1=${p_thresh_val},ARGS2=${subtype},ARGS3=${j} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/FSS_LARGE_PARALLEL_STEP_4.sh
+  done
+done    
+#######################################
+
+
+
+#######################################
+# check if jobs finished successfully
+squeue -u jll1 | grep "FSS" | wc -l
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/tmp
+for path1 in OVERALL ERPOS ERNEG TNBC
+do
+  cd $path1
+  echo $path1
+  ls OFFSET_CHROM_WINDOW_SNP_LIST_pthresh_${p_thresh_str}* | wc -l
+  ls SELECTION_2_SNP_LIST_OFFSET_CHROM_WINDOW_SNP_LIST_pthresh_${p_thresh_str}* | wc -l
+  cd ..
+done
+#######################################
+
+
+
+#######################################
+# copy selected SNPs into the FSS output folder
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  echo Copying SNPS for ${subtype}
+  cp /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/tmp/${subtype}/SELECTION_2_SNP_LIST_OFFSET_CHROM_WINDOW_SNP_LIST_pthresh_${p_thresh_str}_* /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/Forward_Stepwise_Regression/${subtype}/SELECTED_SNPS/
+done
+
+# obtaining scoring file for Forward Stepwise Selection SNPs
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/FSS_LARGE_PARALLEL_SCORING.R ${p_thresh_val}
+
+#######################################
+
