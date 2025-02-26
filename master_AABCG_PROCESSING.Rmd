@@ -1,0 +1,299 @@
+# Processing AABCG SNP and INDEL data
+
+## Initializing interactive session
+```{bash}
+#SBATCH --partition=tier2q
+srun --ntasks=1 --cpus-per-task=1 --mem=100G --time=240:00:00 --partition=tier2q --pty bash
+module load gcc
+module load plink/2.0
+module load miniconda3
+conda activate r_env
+```
+
+## Processing DATASET_01: 1) Converting multiallelic to biallelic variants 2) Normalizing these variants to the hg38 reference genome 3) Concatenating the SNP and INDEL files
+```{bash}
+# processing DATASET_01 SNPs
+cd /gpfs/data/huo-lab/AABCG/data/AABCG_dataset_01_WGS/AABCG_dataset_01_WGS_SNP
+dataset_list_01_SNP=`ls *.vcf.gz`
+for i in `echo $dataset_list_01_SNP`
+do
+    first_path=/gpfs/data/huo-lab/AABCG/data/AABCG_dataset_01_WGS/AABCG_dataset_01_WGS_SNP
+    prefix=`echo $i | cut -d "." -f1`
+    sbatch --export=ARGS1=${first_path},ARGS3=${prefix} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/bcftools_normalize_DATASET_01.sh
+done
+cd /scratch/jll1/AABCG_PROCESSING/INTERMEDIATE_DATASET_01_FILES
+
+# processing DATASET_01 INDELs
+cd /gpfs/data/huo-lab/AABCG/data/AABCG_dataset_01_WGS/AABCG_dataset_01_WGS_indel
+dataset_list_01_indel=`ls *.vcf.gz`
+for i in `echo $dataset_list_01_indel`
+do
+    first_path=/gpfs/data/huo-lab/AABCG/data/AABCG_dataset_01_WGS/AABCG_dataset_01_WGS_indel
+    prefix=`echo $i | cut -d "." -f1`
+    sbatch --export=ARGS1=${first_path},ARGS3=${prefix} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/bcftools_normalize_DATASET_01.sh
+done
+cd /scratch/jll1/AABCG_PROCESSING/INTERMEDIATE_DATASET_01_FILES
+
+# concatenating processed SNPs and INDELs
+cd /scratch/jll1/AABCG_PROCESSING/INTERMEDIATE_DATASET_01_FILES
+for i in `seq 1 22`
+do
+    sbatch --export=ARGS1=${i} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/bcftools_concat_DATASET_01_SNP_indel.sh
+done
+cd /scratch/jll1/AABCG_PROCESSING/PREMERGE_VCF_FILES
+```
+
+## Processing DATASET_02: 1) Removing duplicates 2) Normalizing these variants to the hg38 reference genome 3) Giving them SNP identifiers 
+```{bash}
+cd /gpfs/data/huo-lab/AABCG/data
+dataset_list_02=`ls AABCG_dataset_02_WGS2/*.vcf.gz`
+for i in `echo $dataset_list_02`
+do
+    first_path=/gpfs/data/huo-lab/AABCG/data
+    second_path=`echo $i | cut -d "/" -f1`
+    prefix=`echo $i | cut -d "/" -f2 | cut -d "." -f1`
+    echo ${first_path}/${second_path}/${prefix}
+    sbatch --export=ARGS1=${first_path},ARGS2=${second_path},ARGS3=${prefix} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/bcftools_normalize_DATASET_02.sh
+done
+cd /scratch/jll1/AABCG_PROCESSING/PREMERGE_VCF_FILES
+```
+
+## Processing DATASET_03 until DATASET_11
+```{bash}
+cd /gpfs/data/huo-lab/AABCG/data
+dataset_list_snparray=`ls */*.vcf.gz | grep "AABCG_dataset_" | grep -v "Old" | grep -v "AABCG_dataset_02_WGS2"`
+for i in `echo $dataset_list_snparray`
+do
+    first_path=/gpfs/data/huo-lab/AABCG/data
+    second_path=`echo $i | cut -d "/" -f1`
+    prefix=`echo $i | cut -d "/" -f2 | cut -d "." -f1`
+    echo ${first_path}/${second_path}/${prefix}
+    sbatch --export=ARGS1=${first_path},ARGS2=${second_path},ARGS3=${prefix} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/bcftools_process_DATASET_SNP_ARRAY.sh
+done
+cd /scratch/jll1/AABCG_PROCESSING/PREMERGE_VCF_FILES
+```
+
+## Merging all DATASETS
+```{bash}
+mkdir /scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001
+for i in `seq 1 22`
+do
+    sbatch --export=ARGS1=${i} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/bcftools_merge_ALL_DATASET.sh
+done
+```
+
+# Preparing partition folders
+```{bash}
+mkdir /scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001/sample_list
+mkdir /scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001/partition_raw 
+mkdir /scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001/partition_tmp
+mkdir /scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001/partition_metrics
+mkdir /scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001/partition_file_list
+mkdir /scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001/chr_variant_ID_list
+```
+
+# Extracting lists of variants available across datasets from the merged vcfs 
+```{bash}
+for i in `seq 1 22` 
+do
+    sbatch --export=ARGS1=${i} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/bcftools_query_variants.sh
+done
+```
+
+# Obtaining GT/GP partitions and sample lists for each chromosome/merged dataset
+```{bash}
+for i in `seq 1 22` 
+do
+    sbatch --export=ARGS1=${i} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/bcftools_extract_sample_GTGP_partition.sh
+done
+
+# cd /scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001/partition_raw
+# for i in `seq 1 22`; do cd chr${i}; rm *; cd ..; done
+# rm /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/logs/logs_bcftools_extract_sample_GTGP_partition_*
+```
+
+# Obtaining partition file lists prior to running our dosage parsing
+```{bash}
+partition_file_list_path=/scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001/partition_file_list
+
+cd /scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001/partition_raw
+ls *GP* | split -l 50 -d -a 3 - ${partition_file_list_path}/partition_file_list_
+cd /scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001/partition_file_list
+```
+
+# Parsing GT and GP files to output DOSAGE files
+```{bash}
+# initial parsing of GT and GP files to form dosage files
+cd /scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001/partition_file_list
+for i in *
+do
+    sbatch --export=ARGS1=${i} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/PARSE_GTGP.sh
+done
+
+# additionally parsing dosage files for PLINK2 input
+cd /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/dosage
+## making file lists of partitions
+ls | split -l 50 -d -a 3 - /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/partition_filelist_forplink/partition_file_list_
+## parsing dosage files to swap the order of A2 and A1 alleles to be in line with plink 
+cd /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/partition_filelist_forplink
+for i in *
+do
+  sbatch --export=ARGS1=${i} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/PARSE_DOSAGE.sh
+done
+```
+
+# Combining partitions into chromosomes
+```{bash}
+# dosage files
+cd /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/dosage_A1A2
+for i in `seq 1 22`
+do
+    echo $i
+    cat chr${i}_partition_* > /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/combined_chr/dosage/chr${i}.dosage.gz
+done
+cd /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/combined_chr/dosage
+```
+
+# Creating fam files for each dosage file
+```{bash}
+# creating an entire list of samples for each fam file 
+cd /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/sample_list
+input_list_path=/scratch/jll1/AABCG_PROCESSING/merge_chr_pass_001/sample_list
+output_list_path=/gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/sample_list
+for i in `seq 1 22`
+do
+	cat ${input_list_path}/chr${i}/GPsamples.txt > ${output_list_path}/chr${i}.samplist
+	cat ${input_list_path}/chr${i}/GTsamples.txt >> ${output_list_path}/chr${i}.samplist
+done
+
+# creating the fam files in R
+Rscript /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/rscripts/create_fam_from_samplist.r
+```
+
+# Converting dosage files to pfiles by chromosome and then merging together to obtain a single pfile with all the data
+```{bash}
+module load gcc
+module load plink/2.0
+
+# generating pfiles from dosage files 
+for i in `seq 1 22`
+do
+    sbatch --export=ARGS1=${i} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/convert_dosage_pfile.sh
+done
+
+# merging all the chromosome pfiles into a single pfile
+sbatch /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/plink2_merge_pfile.sh
+```
+
+# Processing the genetic data for both TWAS/GWAS and PRS projects
+```{bash}
+# Obtaining EUR 330 variant dosages that were recovered across all datasets 
+Rscript /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/rscripts/OBTAIN_EUR_660.R
+
+# obtaining list of bpgen files that have updated EUR 330 variant dosages
+cd /gpfs/data/huo-lab/AABCG/data/PRS330_AABCG
+bpgen_list=`ls *.pgen | cut -d"." -f1`
+
+# converting the bpgen files that have updated EUR 330 variant dosages into traw files
+cd /scratch/jll1/AABCG_PROCESSING/EUR330/traw
+for bpgen_file in $bpgen_list
+do
+  plink2 --bpfile /gpfs/data/huo-lab/AABCG/data/PRS330_AABCG/${bpgen_file} --export Av --memory 100000 --threads 1 --out ${bpgen_file}
+done
+
+# generating a master file of all genetic data by collating all of the previous data with the updated EUR 330 data
+Rscript /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/rscripts/COLLATE_ORIGINAL_DATA_330_VARIANTS.R >& /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/logs/COLLATE_ORIGINAL_DATA_330_VARIANTS.txt
+
+# filter all variants for PRS and TWAS/GWAS projects 
+Rscript /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/rscripts/FILTER_ALL_VARIANTS.R >& /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/logs/FILTER_ALL_VARIANTS.txt
+
+# perform mean imputation for the PRS variants with low missingness
+cd /scratch/jll1/AABCG_PROCESSING/MEAN_IMPUTATION/INPUT/input_partitionlist
+for i in *
+do
+  sbatch --export=ARGS1=${i} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/PRS_MEAN_IMPUTATION.sh
+done
+
+# generating combined file of all those mean imputed files
+cd /scratch/jll1/AABCG_PROCESSING/MEAN_IMPUTATION/OUTPUT/output_snplist_traw
+head -1 snplist_1.txt.traw > ../output_combined_traw/combined_mean_imputed.traw
+# cat the contents of all files, skipping the first line of each file
+for file in snplist_*.txt.traw
+do
+    tail -n +2 ${file} >> ../output_combined_traw/combined_mean_imputed.traw
+done
+
+# impute remaining variants from 330 with high missingness and collate it with the PRS dataset -- need to run the code preceeding this to generate "combined_mean_imputed.traw"
+## generate EUR 313 scoring files
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/GENERATE_EUR_313_SCORE_FILES_hg38.R
+## performing imputation for those high missingness variants
+Rscript /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/rscripts/IMPUTE_REMAIN_EUR_330_DOSAGE.R >& /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/logs/IMPUTE_REMAIN_EUR_330_DOSAGE.txt
+
+# putting file in directory relevant for downstream PRS development
+plink2 -pfile /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/MASTER_FILES/PRS/PRS --make-pgen --out /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/FILTERED_all_combined_chr
+# computing allele frequencies in this filtered file for future reference
+plink2 -pfile /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/FILTERED_all_combined_chr --freq --out /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/FILTERED_all_combined_chr_FREQ
+```
+
+# Obtain PCs
+```{bash} 
+# LD pruning this final filtered pfile 
+sbatch /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/plink2_LD_prune.sh
+
+# generating PCs from the pruned file 
+sbatch /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/plink2_compute_pca.sh
+```
+
+# Converting pgen into bfile with a geno 0.05 filter
+```{bash}
+plink2 --pfile /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/FILTERED_all_combined_chr --geno 0.05 --make-bed --out /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/bfile/FILTERED_all_combined_chr
+
+# identifying SNPs that were filtered out [optional]
+R
+library(data.table)
+library(dplyr)
+pvar <- fread("/gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/FILTERED_all_combined_chr.pvar",header=T)$ID
+bim <- fread("/gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/bfile/FILTERED_all_combined_chr.bim",header=F)$V2
+write.table(data.frame(setdiff(pvar,bim)),file="/gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/bfile/excluded_snps_geno_0.05.txt",quote=F,row.names=F,col.names=F)
+```
+
+# Examining PCs and then creating covariate files and splitting samples into training, testing, and validation sets
+```{bash}
+module load gcc
+module load miniconda3
+conda activate r_env
+module load plink/2.0
+
+# generating the splits and inputting a seed number 
+date +"%r"
+Rscript /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/rscripts/generating_testing_training_validation_pheno_cov.r 2024 >& /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/logs/generating_testing_training_validation_pheno_cov.txt
+# cp /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/pheno_cov/* /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input
+```
+
+# Obtaining GWAS summary statistics utilizing each subtype's training set 
+```{bash}
+for i in 10
+do
+  for j in OVERALL ERPOS ERNEG TNBC
+  do
+    sbatch --export=ARGS1=${i},ARGS2=${j} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/plink2_GWAS_glm.sh
+  done
+done
+```
+
+# Obtaining GWAS summary statistics utilizing each subtype's testing set 
+```{bash}
+for i in 10
+do
+  for j in OVERALL ERPOS ERNEG TNBC
+  do
+    sbatch --export=ARGS1=${i},ARGS2=${j} /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/sbatch/plink2_GWAS_glm_testing.sh
+  done
+done
+```
+
+# Checking whether the predictive ability of the EUR PRS is consistent across testing and validation sets
+```{r}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/code/rscripts/EVALUATE_EUR_PRS.R 
+date +"%r"
+```

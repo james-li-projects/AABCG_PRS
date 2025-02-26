@@ -1,0 +1,1409 @@
+# Initializing interactive session
+```{bash}
+#SBATCH --partition=tier2q
+srun --ntasks=1 --cpus-per-task=20 --mem=100G --time=100:00:00 --pty bash
+module load gcc
+module load plink/2.0
+module load miniconda3
+conda activate r_env
+export TMPDIR=/scratch/jll1/tmp
+```
+
+# Forward stepwise selection
+```{bash}
+# utilize this rmarkdown to run FSS
+/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/FSS_PARALLEL_CRUDE_PIPELINE.Rmd
+```
+
+# Harmonizing summary statistics
+```{bash}
+sbatch /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/PREPARE_XANCESTRY_SUMSTATS.sh
+sbatch /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/PREPARE_XANCESTRY_SUMSTATS_PART_2.sh
+```
+
+# Genome-wide PRS approaches
+```{bash}
+################################
+################################
+# PREPARING SUMMARY STATISTICS #
+################################
+################################
+R
+library(dplyr)
+library(data.table)
+
+for (subtype in c("OVERALL","ERPOS","ERNEG","TNBC")) {
+  print(paste("PARSING SUMMARY STATISTICS FOR SUBTYPE:",subtype))
+  # importing summary statistics
+  sumstats <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GWAS_sumstats/consistent_effect_allele/",subtype,".sumstats"),header=T)
+  colnames(sumstats)
+  sumstats <- sumstats %>% filter(ERRCODE == ".")
+  
+  # setting the A2 allele
+  sumstats$A2[sumstats$ALT==sumstats$A1] <- sumstats$REF[sumstats$ALT==sumstats$A1]
+  sumstats$A2[sumstats$ALT!=sumstats$A1] <- sumstats$ALT[sumstats$ALT!=sumstats$A1]
+  
+  # selecting the relevant columns and then renaming them
+  sumstats <- sumstats %>% select(`#CHROM`,POS,ID,A1,A2,OBS_CT,`LOG(OR)_SE`,P,OR,A1_FREQ)
+  colnames(sumstats) <- c("CHR","BP","SNP","A1","A2","N","SE","P","OR","A1_FREQ")
+  sumstats$IS_A1_MINOR <- sumstats$A1_FREQ < 0.5
+  sumstats$MAF[sumstats$IS_A1_MINOR==TRUE] <- sumstats$A1_FREQ[sumstats$IS_A1_MINOR==TRUE] 
+  sumstats$MAF[sumstats$IS_A1_MINOR==FALSE] <- 1-sumstats$A1_FREQ[sumstats$IS_A1_MINOR==FALSE] 
+  sumstats <- sumstats %>% select(-A1_FREQ,-IS_A1_MINOR)
+  sumstats$INFO <- 1
+  
+  # writing out parsed summary statistics
+  write.table(sumstats, file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/sumstats/training_",subtype,"_PC_10.Status.glm.logistic.hybrid"),quote=F,row.names=F,col.names=T,sep="\t")
+}
+
+##############################
+##############################
+# PREPARING TESTING SET DATA #
+##############################
+##############################
+# preparing covariate and phenotype files
+R
+library(dplyr)
+library(data.table)
+
+for (subtype in c("OVERALL","ERPOS","ERNEG","TNBC")) {
+  print(paste("PARSING COVARIATE AND PHENOTYPE FILES FOR SUBTYPE:",subtype))
+  # importing phenotype and covariate file
+  pheno_cov <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/testing_",subtype,".pheno_cov"),header=T)
+  colnames(pheno_cov)[1] <- "IID"
+  pheno_cov$FID <- 0
+  # create dummy variables for each platform
+pheno_cov_platform <- data.frame(model.matrix( ~ Platform - 1, data = pheno_cov)) %>% select(-PlatformWGS)
+  pheno_cov <- cbind(pheno_cov, pheno_cov_platform)
+
+  # create cov file
+  cov <- pheno_cov %>% select(FID,IID,Age,PlatformAABC,PlatformAMBER,PlatformBCAC_OncoArray,PlatformGBHS,PlatformMEGA,PlatformROOT)
+  write.table(cov, file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pheno_cov/testing_",subtype,".cov"),quote=F,row.names=F,col.names=T,sep="\t")
+
+  # create pheno file
+  pheno <- pheno_cov %>% select(FID,IID,Status)
+  write.table(pheno, file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pheno_cov/testing_",subtype,".pheno"),quote=F,row.names=F,col.names=T,sep="\t")
+  
+  # create eigenvec file
+  eigenvec <- pheno_cov %>% select(FID,IID,PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10)
+  write.table(eigenvec, file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pheno_cov/testing_",subtype,".eigenvec"),quote=F,row.names=F,col.names=T,sep="\t")
+}
+q()
+n
+
+# Copying training, testing, and validation sets into the GENOME_WIDE_APPROACHES bfile folder
+for subtype in ERPOS ERNEG TNBC OVERALL
+do
+  for set_identifier in training testing validation
+  do
+    echo ${set_identifier} ${subtype}
+    cp /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/split_${set_identifier}_${subtype}.bed /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/
+    cp /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/split_${set_identifier}_${subtype}.bim /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/
+    cp /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/split_${set_identifier}_${subtype}.fam /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/
+  done
+done
+
+# clumping variants
+for subtype in ERPOS ERNEG TNBC OVERALL
+do
+  sbatch --export=ARGS1=${subtype} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/CLUMP_VARIANTS.sh
+done
+
+# more stringent clumping
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  sbatch --export=ARGS1=${subtype},ARGS2=${pthresh},ARGS3=${r2thresh} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/PREPROCESS_CLUMP_GENOME.sh
+done
+```
+
+# PLINK2 C+T PGEN
+```{bash}
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  for pthresh in 0.001 0.01 0.05 0.1 0.2 0.3 0.4 0.5
+  do
+    for r2thresh in 0.1
+    do
+      sbatch --export=ARGS1=${subtype},ARGS2=${pthresh},ARGS3=${r2thresh} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/PLINKCT.sh
+    done
+  done
+done
+
+# generating scoring files for each threshold and subtype
+library(data.table)
+library(dplyr)
+for (subtype in c("OVERALL","ERPOS","ERNEG","TNBC")) {
+  print(subtype)
+  setwd(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PLINKCT/",subtype))
+  sumstats<-fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GWAS_sumstats/consistent_effect_allele/",subtype,".sumstats"))
+  clump_list <- list.files()[grepl(".clumps",list.files())]
+  
+  for (clump_name in clump_list) {
+    # modifying clump score file name
+    mod_clump_name <- paste0(subtype,"_","PLINKCT_",gsub(".clumps","",clump_name))
+    mod_clump_name <- gsub("_r2_0.1","",gsub("clump_p_","",mod_clump_name))
+    print(mod_clump_name)
+    clump_df <- fread(clump_name)
+    clump_id_list <- clump_df$ID
+    
+    score_file <- sumstats %>% filter(ID %in% clump_id_list) %>% mutate(BETA=log(OR)) %>% select(ID,A1,BETA) %>% arrange(ID)
+    
+    write.table(score_file,file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_FILES/",mod_clump_name),row.names=F,col.names=F,quote=F,sep="\t")
+  }
+}
+
+# run the below separately in R to calculate some preliminary AUCs
+# /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/PLINKCT.R
+```
+
+# PRSice-2
+```{bash}
+R
+library(data.table)
+library(tidyverse)
+library(pROC)
+
+# set working diretory
+setwd("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/PRSice-2")
+
+# initializing subtype list
+subtype_list <- c("ERPOS","ERNEG","TNBC","OVERALL")
+
+for (subtype in subtype_list) {
+  print(paste("PARSING COVARIATES FOR SUBTYPE:",subtype))
+  # import covariates and also eigenvectors
+  covariate <- read.table(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pheno_cov/testing_",subtype,".cov"), header=T)
+  pcs <- read.table(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pheno_cov/testing_",subtype,".eigenvec"), header=F)
+  colnames(pcs) <- c("FID","IID", paste0("PC",1:10))
+  cov <- merge(covariate, pcs, by=c("FID", "IID"))
+  write.table(cov,file=paste0(subtype,".covariate"), quote=F, row.names=F)
+}
+
+# running PRSice-2
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/software/PRSice-2/PRSice.R \
+    --prsice /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/software/PRSice-2/PRSice_linux \
+    --base /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/sumstats/training_${subtype}_PC_10.Status.glm.logistic.hybrid \
+    --target /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/split_testing_${subtype} \
+    --binary-target T \
+    --pheno /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pheno_cov/testing_${subtype}.pheno \
+    --cov /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/PRSice-2/${subtype}.covariate \
+    --base-maf MAF:0 \
+    --base-info INFO:0.8 \
+    --stat OR \
+    --or \
+    --print-snp \
+    --out /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/PRSice-2/${subtype}
+done
+
+# write out scoring file
+library(data.table)
+library(dplyr)
+setwd("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/PRSice-2")
+for (subtype in c("OVERALL","ERPOS","ERNEG","TNBC")) {
+  print(paste("PREPARING SCORING FILE FOR:",subtype))
+  sumstats <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/sumstats/training_",subtype,"_PC_10.Status.glm.logistic.hybrid"),header=T,sep="\t")
+  selected_snp_list <- (fread(paste0(subtype,".snp"),header=T))$SNP
+  output_score_file <- sumstats %>% filter(SNP %in% selected_snp_list) %>% mutate(BETA = log(OR)) %>% select(SNP,A1,BETA)
+  write.table(output_score_file,file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_FILES/",subtype,"_PRSICE2"),row.names=F,col.names=F,quote=F,sep="\t")
+}
+
+# evaluate AUC
+R
+library(data.table)
+library(dplyr)
+library(pROC)
+
+setwd("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/PRSice-2/")
+
+subtype_list=c("ERPOS","ERNEG","OVERALL","TNBC")
+  
+for (i in seq(subtype_list)) {
+  subtype=subtype_list[i]
+  output<-fread(paste0(subtype,".best"),header=T)
+  phenotype <- read.table(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pheno_cov/testing_",subtype,".pheno"), header=T)
+  # Read in the PCs
+  pcs <- read.table(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pheno_cov/testing_",subtype,".eigenvec"), header=F)
+  # The default output from plink does not include a header
+  colnames(pcs) <- c("FID", "IID", paste0("PC",1:10)) 
+  # Read in the covariates (here, it is sex)
+  covariate <- read.table(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pheno_cov/testing_",subtype,".cov"), header=T)
+  # Now merge the files
+  pheno <- merge(merge(phenotype, covariate, by=c("FID", "IID")), pcs, by=c("FID","IID"))
+  # computing AUC
+  pheno.prs <- inner_join(output,pheno,by=c("FID","IID"))
+  roc_score=roc(as.factor(pheno.prs$Status), pheno.prs$PRS) #AUC score
+  output_auc <- as.numeric(auc(roc_score))
+  output_auc_CI <- as.vector(ci.auc(roc_score))
+  output_auc_CI_lower <- output_auc_CI[1]
+  output_auc_CI_upper <- output_auc_CI[3]
+  print(paste("Unadjusted AUC of",subtype,"BC Status:", output_auc))
+  print(paste("Unadjusted AUC of",subtype,"BC Status:", output_auc_CI_lower, output_auc_CI_upper))
+}
+
+```
+
+# LDpred2 and Lassosum2
+```{bash}
+R
+library(data.table)
+library(dplyr)
+
+######################################################
+# Setting up sumstats for analysis with hapmap3 SNPs #
+######################################################
+# set working directory
+setwd("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/sumstats/hm3")
+
+# Obtain HapMap3 SNPs
+info <- readRDS(runonce::download_file(
+  "https://figshare.com/ndownloader/files/37802721",
+  dir = "tmp-data", fname = "map_hm3_plus.rds"))
+hm3_plus_SNP_chr_pos_list <- paste(info$chr,info$pos_hg38,sep=":")
+
+for (subtype in c("OVERALL","ERPOS","ERNEG","TNBC")) {
+  print(paste("PROCESSING SUMMARY STATISTICS FOR SUBTYPE:",subtype))
+  # Load and transform the summary statistic file
+  # Read in the summary statistic file
+  sumstats <- bigreadr::fread2(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/sumstats/training_",subtype,"_PC_10.Status.glm.logistic.hybrid")) 
+  sumstats <- sumstats %>% select(CHR,BP,SNP,A1,A2,N,SE,P,OR,INFO,MAF)
+  # LDpred 2 require the header to follow the exact naming
+  names(sumstats) <-
+    c("chr",
+      "pos",
+      "rsid",
+      "a1",
+      "a0",
+      "n_eff",
+      "beta_se",
+      "p",
+      "OR",
+      "INFO",
+      "MAF")
+  # Transform the OR into log(OR)
+  sumstats$beta <- log(sumstats$OR)
+  # Filter for hapmap SNPs
+  sumstats <- sumstats %>% mutate(chrpos_id = paste(chr,pos,sep=":")) %>% filter(chrpos_id %in% hm3_plus_SNP_chr_pos_list) %>% select(-chrpos_id)
+    print(nrow(sumstats))
+  # print out SNPs to retain
+  write.table(sumstats %>% select(rsid),file=paste0("snp_list_",subtype,".list"),col.names=T,row.names=F,quote=F)
+  # print out hm3 filtered sumstats
+  write.table(sumstats,file=paste0(subtype,".sumstats"),col.names=T,row.names=F,quote=F,sep="\t")
+}
+
+######################################################
+# Setting up sumstats for analysis with CLUMPED SNPs #
+######################################################
+# set working directory
+setwd("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/sumstats/CLUMPED")
+
+for (subtype in c("OVERALL","ERPOS","ERNEG","TNBC")) {
+  print(paste("PROCESSING SUMMARY STATISTICS FOR SUBTYPE:",subtype))
+  # Load and transform the summary statistic file
+  # Read in the summary statistic file
+  sumstats <- bigreadr::fread2(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/sumstats/training_",subtype,"_PC_10.Status.glm.logistic.hybrid")) 
+  sumstats <- sumstats %>% select(CHR,BP,SNP,A1,A2,N,SE,P,OR,INFO,MAF)
+  # import CLUMPED SNPs
+  clumped_SNP_list <- (fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/split_training_",subtype,".clumped.variant.list"),header=F))$V1
+  # LDpred 2 require the header to follow the exact naming
+  names(sumstats) <-
+    c("chr",
+      "pos",
+      "rsid",
+      "a1",
+      "a0",
+      "n_eff",
+      "beta_se",
+      "p",
+      "OR",
+      "INFO",
+      "MAF")
+  # Transform the OR into log(OR)
+  sumstats$beta <- log(sumstats$OR)
+  # Filter for CLUMPED SNPs
+  sumstats <- sumstats %>% filter(rsid %in% clumped_SNP_list)
+  print(nrow(sumstats))
+  # print out CLUMPED filtered sumstats
+  write.table(sumstats,file=paste0(subtype,".sumstats"),col.names=T,row.names=F,quote=F,sep="\t")
+}
+q()
+n
+
+# limiting bfiles to only hm3 plus SNPs
+module load plink/1.9
+for subtype in ERPOS ERNEG TNBC OVERALL
+do
+  plink --bfile /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/split_testing_${subtype} --extract /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/sumstats/hm3/snp_list_${subtype}.list --make-bed --out /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/hm3_split_testing_${subtype}
+done
+
+
+########################################################
+# Submitting LDpred2 and lassosum2 scripts to the server [SKIP THE COMMENTED OUT SECTION BELOW AND RUN THE LOCAL CODE BELOW THIS CHUNK]
+
+# removing temporary files
+rm /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/LDpred2_lassosum2/*.bk
+rm /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/*.bk
+rm /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/LDpred2_lassosum2/*.rds
+rm /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/logs/LDpred2_lassosum2_*
+rm /scratch/jll1/PRS_AABCG/*/*.sbk
+rm /scratch/jll1/PRS_AABCG/*/*.OMNI.interpolated_genetic_map
+
+#for snp_subset in CLUMPED hm3 
+#do
+#  for subtype in OVERALL ERPOS ERNEG TNBC
+#  do
+#    sbatch --export=ARGS1=${subtype},ARGS2=${snp_subset} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/LDpred2_lassosum2.sh
+#  done
+#done
+
+# run this locally 
+for snp_subset in hm3 # CLUMPED  
+do
+  for subtype in OVERALL ERPOS ERNEG TNBC
+  do
+    Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/LDpred2_lassosum2.R ${subtype} ${snp_subset} >& /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/LDpred2_lassosum2/${subtype}/log_${snp_subset}.txt
+  done
+done
+
+# write out scoring files
+library(data.table)
+library(dplyr)
+
+for (subtype in c("OVERALL","ERPOS","ERNEG","TNBC")) {
+  for (filter_cat in c("CLUMPED","hm3")) {
+   for (method_cat in c("auto","lassosum2")) {
+    print(paste("PREPARING SCORING FILE FOR:",subtype,method_cat,filter_cat))
+    setwd(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/LDpred2_lassosum2/",subtype))
+    load(paste0("beta_info_snp_",filter_cat,"_",subtype,"_",method_cat,".RData"))
+    
+    if(method_cat == "auto") {
+      method_cat <- "LDPRED2AUTO"
+    }
+    
+    output_score_file <- beta_info_snp[,c(5,4,ncol(beta_info_snp))]
+    colnames(output_score_file)[3] <- "beta"
+    output_score_file <- output_score_file %>% filter(beta!=0)
+    
+    write.table(output_score_file,file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_FILES/",subtype,"_",toupper(method_cat),"_",filter_cat),row.names=F,col.names=F,quote=F,sep="\t")  
+    }
+  }
+}
+```
+
+# CT-SLEB genome-wide cross-ancestry approach
+```{bash}
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/CTSLEB
+
+# obtaining combined validation and training set sample lists
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  cat /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/testing_${subtype}.samplist > combined_${subtype}.samplist
+  cat /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/validation_${subtype}.samplist >> combined_${subtype}.samplist
+done
+
+# extracting these combined samples from the filtered bfile
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  plink2 -bfile /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/bfile/FILTERED_all_combined_chr --keep combined_${subtype}.samplist --make-bed --out combined_testing_validation_${subtype}
+done
+
+# running CT-SLEB on the server
+# dos2unix /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/CT-SLEB_RUN.sh
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  sbatch --export=ARGS1=${subtype} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/CT-SLEB_RUN.sh
+done
+```
+
+# PRScsx genome-wide cross-ancestry approach
+```{bash}
+# preparing PRScsx summary statistic files 
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/PRSCSX_PREPARE.R ${subtype}
+done
+
+# preparing tuning and validation set bfiles 
+module load plink/2.0
+for subtype in ERPOS ERNEG TNBC OVERALL
+do
+  # converting validation pfile to bfile
+  plink2 -bfile /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/split_validation_${subtype} --update-name /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/PRScsx/bim_dictionary_${subtype}.txt 2 1 --make-bed --out /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/PRScsx/split_validation_${subtype}
+  # converting testing pfile to bfile
+  plink2 -bfile /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/bfile/split_testing_${subtype} --update-name /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/PRScsx/bim_dictionary_${subtype}.txt 2 1 --make-bed --out /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/PRScsx/split_testing_${subtype}
+done
+
+####################
+## RUNNING PRScsx ##
+####################
+for subtype in OVERALL ERPOS ERNEG TNBC 
+do
+  for i in `seq 1 22`
+  do
+  	echo "Running PRScsx for "$subtype "for chromosome #"${i}
+  	sbatch --export=ARGS1=${i},ARGS2=${subtype} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/PRScsx_RUN.sh
+  done
+done
+
+##############################################
+# COMPUTING PRScsx SCORES IN THE TESTING SET #
+##############################################
+module load plink/1.9
+# combining effect sizes across chromosomes for EUR and AFR separately
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PRScsx/allchr_eff/${subtype}
+  rm *
+done
+# actually combining the effect sizes
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PRScsx/snp_effect_size_estimates/${subtype}
+  for file in PRScsx_EUR_pst_eff_a1_b0.5_phi1e-02_chr*
+    do
+      cat $file >> ../../allchr_eff/${subtype}/PRScsx_allchr_eff_EUR.txt
+  done
+  for file in PRScsx_AFR_pst_eff_a1_b0.5_phi1e-02_chr*
+    do
+      cat $file >> ../../allchr_eff/${subtype}/PRScsx_allchr_eff_AFR.txt
+  done
+done
+
+# changing scoring files from rsID to chr:pos format
+R
+library(data.table)
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+# converting all rsIDs to chr:pos for all PRScsx output files
+for (subtype in c("OVERALL","ERPOS","ERNEG","TNBC")) {
+  for (ancestry in c("EUR","AFR")) {
+    print(paste(subtype,ancestry))
+    dict <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/PRScsx/bim_dictionary_",subtype,".txt"),header=F)
+    dict <- dict %>% tidyr::separate(V1, into = c("chr","pos","a2","a1"),remove=F,sep=":")
+    score_file <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PRScsx/allchr_eff/",subtype,"/PRScsx_allchr_eff_",ancestry,".txt"),header=F) %>% select(V2,V4,V6)
+    joined_score <- inner_join(score_file,dict,by=c("V2"))
+    joined_score <- joined_score %>% mutate(AlignedEffect = ifelse(a1 == V2, V6, -V6))
+    joined_score <- joined_score %>% select(V1,a1,AlignedEffect) %>% filter(AlignedEffect != 0) %>% arrange(V1)
+    write.table(joined_score,file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PRScsx/ANCESTRY_SCORE_FILES/",subtype,"_",ancestry,".txt"),quote=F,sep="\t",col.names=F,row.names=F)
+  }
+}
+q()
+n
+
+# scoring ancestry-specific PRS files from PRScsx
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  for ancestry in EUR AFR
+  do
+    sbatch --export=ARGS1=${subtype},ARGS2=${ancestry} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/PRScsx_SCORE.sh
+  done
+done
+
+# generating cross-ancestry scoring files for PRScsx
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/PRSCSX_GENERATE_SCORE_FILES.R ${subtype}
+done
+
+# copying these cross-ancestry scoring files into the directory with all other score files
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PRScsx/SCORE_FILES
+for file in *
+do
+  cp ${file} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_FILES/
+done
+```
+
+# Generating scoring files for EUR 330
+```{r}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/GENERATING_SCORE_FILE_AVAILABLE_EUR_330.R
+```
+
+# Generating scoring files for EUR 313 (the full 330)
+```{r}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/GENERATING_SCORE_FILE_AVAILABLE_EUR_313.R
+```
+
+# Extracting testing and validation sets from pfiles 
+```{bash}
+#######################################
+# first obtaining genetic data with imputation for high missingness variants based on European coefficients
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pfile/EUR_IMPUTE
+
+# obtaining combined validation and training set sample lists
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  cat /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/testing_${subtype}.samplist > combined_${subtype}.samplist
+  cat /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/validation_${subtype}.samplist >> combined_${subtype}.samplist
+done
+
+# extracting these combined samples from the filtered bfile
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  plink2 -pfile /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/FILTERED_all_combined_chr --keep combined_${subtype}.samplist --make-pgen --out combined_testing_validation_${subtype}
+done
+
+#######################################
+# obtaining final imputed genetic data
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/ALTERNATE_IMPUTATION_AFR_SCORE_FILES.R
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/ALTERNATE_IMPUTATION_PGEN.R
+
+#######################################
+# finalizing the EUR-313/330 models to be used (all AFR except ERPOS)
+## input_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/IMPUTE_330/SCORE_FILES
+input_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PARSIMONIOUS_330/AFR_SCORE_FILES/ALL_SAMEDIRECTION
+output_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_FILES
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/PROCESS_ANY_SCORE_FILE.R ${input_score_path}/dh_AFR_205_OVERALL.txt ${output_score_path}/EUR_313_OVERALL
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/PROCESS_ANY_SCORE_FILE.R ${input_score_path}/dh_AFR_207_ERPOS.txt ${output_score_path}/EUR_313_ERPOS
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/PROCESS_ANY_SCORE_FILE.R ${input_score_path}/dh_AFR_162_ERNEG.txt ${output_score_path}/EUR_313_ERNEG
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/PROCESS_ANY_SCORE_FILE.R ${input_score_path}/dh_AFR_160_TNBC.txt ${output_score_path}/EUR_330_TNBC
+```
+
+# Moving CT-SLEB scoring files into the directory with all the other scoring files
+```{bash}
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  cat /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CT-SLEB_FEWER_PARAM/${subtype}/score_eb_file_df_final_test | tr " " "\t" > /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_FILES/${subtype}_CTSLEB
+done
+```
+
+# Process all PRS score models to remove 0 effect size SNPs and sort by SNP
+```{bash}
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_FILES
+for score_file in *
+do
+  sbatch --export=ARGS1=${score_file} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/PROCESS_SCORE_FILES.sh
+done
+```
+
+# Computing PRS scores for the processed score files
+```{bash}
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_FILES_PROCESSED
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  for score_file in *
+  do
+    sbatch --export=ARGS1=${subtype},ARGS2=${score_file} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/SCORE_PRS.sh
+  done
+done
+
+# checking status of jobs
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_OUTPUT
+tree /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_OUTPUT | grep "sscore" | wc -l
+squeue -u jll1 | grep "SCORE_PR     jll1  R" | wc -l
+```
+
+# Computing AUC of all XANCESTRY PRS models for each subtype
+```{bash}
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  echo "COMPUTING XANCESTRY PRS MODEL AUC SCORES for:" ${subtype}
+  Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/COMPUTE_AUC_PRS_XANCESTRY.R ${subtype} >& /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_AUC/${subtype}/log_PRS_XANCESTRY.txt
+done
+```
+
+# Computing AUC of all XSUBTYPE PRS models for each subtype
+```{bash}
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  echo "COMPUTING XSUBTYPE PRS MODEL AUC SCORES for:" ${subtype}
+  Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/COMPUTE_AUC_PRS_XSUBTYPE.R ${subtype} >& /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_AUC/${subtype}/log_PRS_XSUBTYPE.txt
+done
+```
+
+# Computing AUC using TWO ENSEMBLE based PRS approaches for each subtype
+```{bash}
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  echo "COMPUTING ENSEMBLE PRS MODEL AUC SCORES for:" ${subtype}
+  Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/COMPUTE_AUC_PRS_ENSEMBLE.R ${subtype} >& /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_AUC/${subtype}/log_PRS_ENSEMBLE.txt
+done
+```
+
+# Computing AUC of parsimonious models for each subtype [retired code]
+```{bash}
+# renaming score files for consistency
+# cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PARSIMONIOUS_330/AFR_SCORE_FILES/SIG_SAMEDIRECTION
+# cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PARSIMONIOUS_330/AFR_SCORE_FILES/ALL_SAMEDIRECTION
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PARSIMONIOUS_330/AFR_SCORE_FILES/HYBRID_330_FSS
+
+# moving scoring files
+# for current_model_name in `ls * | grep -v "281"`
+# for current_model_name in `ls * | grep -v "Parsimonious"`
+for current_model_name in `ls * | grep -v "Details"`
+do
+  str1=`echo ${current_model_name} | sed 's/\.txt$//' | cut -d"_" -f4`
+  str2=`echo ${current_model_name} | sed 's/\.txt$//' | cut -d"_" -f2`
+  cp ${current_model_name} ../PARSIMONIOUS/${str1}_${str2}_PARSIMONIOUS
+done
+
+# scoring parsimonious files
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PARSIMONIOUS_330/AFR_SCORE_FILES/PARSIMONIOUS
+for score_prefix in `ls *`
+do
+  input_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PARSIMONIOUS_330/AFR_SCORE_FILES/PARSIMONIOUS
+  output_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PARSIMONIOUS_330/AFR_SCORE_OUTPUT
+  pfile_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pfile/combined_testing_validation_OVERALL
+  # generating PRS scores for the testing and validation sets
+  plink2 --pfile ${pfile_path} --score ${input_score_path}/${score_prefix} --out ${output_score_path}/${score_prefix}
+done
+
+# generating parsimonious PRS models
+for subtype in OVERALL ERPOS ERNEG TNBC 
+do
+  # Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/COMPUTE_AUC_PRS_PARSIMONIOUS.R ${subtype} >& /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PARSIMONIOUS_330/logs/SIG_SAMEDIRECTION/${subtype}.log
+  # Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/COMPUTE_AUC_PRS_PARSIMONIOUS.R ${subtype} >& /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PARSIMONIOUS_330/logs/ALL_SAMEDIRECTION/${subtype}.log
+  Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/COMPUTE_AUC_PRS_PARSIMONIOUS.R ${subtype} >& /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PARSIMONIOUS_330/logs/HYBRID_330_FSS/${subtype}.log
+done
+```
+
+# Moving parsimonious models into the FINAL_PRS_MODELS directory
+```{bash}
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PARSIMONIOUS_330/AFR_SCORE_FILES/HYBRID_330_FSS
+
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/PROCESS_ANY_SCORE_FILE.R dh_AFR_211_OVERALL.txt /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS/OVERALL_PARSIMONIOUS_HYBRID
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/PROCESS_ANY_SCORE_FILE.R dh_AFR_221_ERPOS.txt /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS/ERPOS_PARSIMONIOUS_HYBRID
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/PROCESS_ANY_SCORE_FILE.R dh_AFR_176_ERNEG.txt /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS/ERNEG_PARSIMONIOUS_HYBRID
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/PROCESS_ANY_SCORE_FILE.R dh_AFR_168_TNBC.txt /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS/TNBC_PARSIMONIOUS_HYBRID
+```
+
+# Moving all single ancestry models into the FINAL_PRS_MODELS directory
+```{bash}
+# copying single ancestry models into the final directory
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/SCORE_FILES_PROCESSED
+for file in *
+do
+  string1=`echo ${file} | cut -d'_' -f1`
+  string2=`echo ${file} | cut -d'_' -f2-`
+  output_prefix=${string1}_SINGLEANCESTRY_${string2}
+  cp ${file} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS/${output_prefix}
+done
+
+# renaming EUR models to also be scored
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS
+for file in EUR_SINGLEANCESTRY_313_ERNEG EUR_SINGLEANCESTRY_313_ERPOS EUR_SINGLEANCESTRY_313_OVERALL EUR_SINGLEANCESTRY_330_TNBC
+do
+  string1=`echo ${file} | cut -d'_' -f1`
+  string2=`echo ${file} | cut -d'_' -f2`
+  string3=`echo ${file} | cut -d'_' -f3`
+  string4=`echo ${file} | cut -d'_' -f4-`
+  mv ${file} ${string4}_${string2}_${string1}_${string3}
+done
+```
+
+# Scoring final PRS models
+```{bash}
+# scoring all the files
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  for score_file in ${subtype}_*
+  do
+    sbatch --export=ARGS1=${subtype},ARGS2=${score_file} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/FINAL_PRS_MODELS_SCORE_PRS.sh
+  done
+done
+```
+
+# Building a PRS tuned on proportion of ER status 
+```{bash}
+########################################################
+# GENERATING SCORES FOR ALL PARTICIPANTS IN VALIDATION #
+########################################################
+# importing arguments and setting paths
+score_prefix=ERPOS_ENSEMBLE_FSS
+input_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS/
+  output_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PROPORTION_TUNED_PRS
+pfile_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pfile/combined_testing_validation_OVERALL
+# generating PRS scores for the testing and validation sets
+plink2 --pfile ${pfile_path} --score ${input_score_path}/${score_prefix} --out ${output_score_path}/${score_prefix}
+
+# importing arguments and setting paths
+score_prefix=ERNEG_ENSEMBLE_GLMNET
+input_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS
+output_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PROPORTION_TUNED_PRS
+pfile_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pfile/combined_testing_validation_OVERALL
+# generating PRS scores for the testing and validation sets
+plink2 --pfile ${pfile_path} --score ${input_score_path}/${score_prefix} --out ${output_score_path}/${score_prefix}
+
+# importing arguments and setting paths
+score_prefix=TNBC_XANCESTRY_PRSICE2
+input_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS
+output_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PROPORTION_TUNED_PRS
+pfile_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pfile/combined_testing_validation_OVERALL
+# generating PRS scores for the testing and validation sets
+plink2 --pfile ${pfile_path} --score ${input_score_path}/${score_prefix} --out ${output_score_path}/${score_prefix}
+
+# importing arguments and setting paths
+score_prefix=OVERALL_ENSEMBLE_FSS
+input_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS
+output_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/PROPORTION_TUNED_PRS
+pfile_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pfile/combined_testing_validation_OVERALL
+# generating PRS scores for the testing and validation sets
+plink2 --pfile ${pfile_path} --score ${input_score_path}/${score_prefix} --out ${output_score_path}/${score_prefix}
+
+########################################################
+# Obtaining score files and metrics for each proportion tuned model #
+########################################################
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/PROPORTION_TUNED_PRS.R
+
+###########################################
+# SCORING THE PROPORTION TUNED PRS MODELS #
+###########################################
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS
+for subtype in OVERALL
+do
+  for score_file in OVERALL_PROPTUNE_*
+  do
+    sbatch --export=ARGS1=${subtype},ARGS2=${score_file} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/FINAL_PRS_MODELS_SCORE_PRS.sh
+  done
+done
+```
+
+# Scoring final PRS models in training set for calibration
+```{bash}
+# scoring all the files
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  for score_file in ${subtype}_*
+  do
+    sbatch --export=ARGS1=${subtype},ARGS2=${score_file} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/CALIBRATION_FINAL_PRS_MODELS_SCORE_TRAINING.sh
+  done
+done
+```
+
+# Calibrating PRS models
+```{bash}
+# obtaining calibrated PRS models
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/CALIBRATION_PRS_MODELS.R ${subtype}
+done
+
+# scoring calibrated PRS models
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS/
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  for score_file in ${subtype}_*
+  do
+    sbatch --export=ARGS1=${subtype},ARGS2=${score_file} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/CALIBRATION_FINAL_PRS_MODELS_SCORE_PRS.sh
+  done
+done
+
+# adjusting score files to not be normalized by number of SNPs
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/CALIBRATION_SCORE_OUTPUT_REMOVE_PLINK2_NORM.R
+```
+
+# Computing OR per SD and percentile for select calibrated models
+```{bash}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/COMPUTE_OR_SELECT_MODELS.R
+```
+
+
+# Moving selected PRS models into folder for external validation
+```{bash}
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS/
+
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  for filename in `ls ${subtype}_* | grep -v "AFR" | grep -v "ALL_SNP"`
+  do
+    cp ${filename} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/EXTERNAL_VALIDATION/${filename}
+  done
+done
+```
+
+# Moving selected models scoring output into a different directory for absolute risk and family history analysis
+```{bash}
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_SCORE_OUTPUT/${subtype}
+  for filename in `ls ${subtype}_* | grep -v "AFR" | grep -v "ALL_SNP"`
+  do
+    cp ${filename} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/ARISK_FAMH_SCORE_OUTPUT/${filename}
+  done
+done
+```
+
+# Generating scoring files for all subtype PRS models for all validation participants (OVERALL)
+```{bash}
+# importing arguments and setting paths
+score_prefix=ERPOS_ENSEMBLE_FSS
+input_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS
+output_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/BEST_SUBTYPE_SCORING_ALL_PARTICIPANTS
+pfile_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pfile/combined_testing_validation_OVERALL
+validation_sample_list=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/validation_OVERALL.samplist
+# generating PRS scores for the testing and validation sets
+plink2 --pfile ${pfile_path} --keep ${validation_sample_list} --score ${input_score_path}/${score_prefix} --out ${output_score_path}/${score_prefix}
+
+# importing arguments and setting paths
+score_prefix=ERNEG_ENSEMBLE_GLMNET
+input_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS
+output_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/BEST_SUBTYPE_SCORING_ALL_PARTICIPANTS
+pfile_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pfile/combined_testing_validation_OVERALL
+validation_sample_list=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/validation_OVERALL.samplist
+# generating PRS scores for the testing and validation sets
+plink2 --pfile ${pfile_path} --keep ${validation_sample_list} --score ${input_score_path}/${score_prefix} --out ${output_score_path}/${score_prefix}
+
+# importing arguments and setting paths
+score_prefix=TNBC_XANCESTRY_PRSICE2
+input_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS
+output_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/BEST_SUBTYPE_SCORING_ALL_PARTICIPANTS
+pfile_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pfile/combined_testing_validation_OVERALL
+validation_sample_list=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/validation_OVERALL.samplist
+# generating PRS scores for the testing and validation sets
+plink2 --pfile ${pfile_path} --keep ${validation_sample_list} --score ${input_score_path}/${score_prefix} --out ${output_score_path}/${score_prefix}
+
+R
+library(data.table)
+library(dplyr)
+
+setwd("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/BEST_SUBTYPE_SCORING_ALL_PARTICIPANTS")
+
+# un-normalizing the score outputs
+score_file_list=list.files()[grepl("sscore",list.files())]
+for (file in score_file_list) {
+  # reading in file
+  SCORE_FILE <- fread(paste0(file)) 
+  NORM_FACTOR <- median(SCORE_FILE$ALLELE_CT)
+  SCORE_FILE$SCORE <- SCORE_FILE$SCORE1_AVG*NORM_FACTOR
+  SCORE_FILE <- SCORE_FILE %>% select(`#IID`,SCORE)
+  
+  # reformatting the output name 
+  OUT_NAME = gsub(".sscore",".UNNORM",file)
+  # writing out score file without plink normalization
+  write.table(SCORE_FILE,file=OUT_NAME,row.names=F,col.names=T,sep="\t",quote=F)
+}
+```
+
+# Absolute risk calculations
+```{r}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/ABSOLUTE_RISK.R
+```
+
+# Family history, ancestry, and age analysis
+```{r}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/ADDITIONAL_ANALYSES.R
+```
+
+# Building a combined model with both PRS and family history
+```{r}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/COMBINED_PRS_FAMHIST.R
+```
+
+# Creating figures and tables
+```{bash}
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/CALIBRATION_COMPUTE_AUC_PRS_XANCESTRY_XSUBTYPE.R ${subtype}
+done
+
+# ensemble in-progress
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/CALIBRATION_COMPUTE_AUC_FINAL_PRS_MODELS_ENSEMBLE.R
+
+# computing ORs by percentiles and by SD
+Rscript /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/rscripts/COMPUTE_OR_SELECT_MODELS.R
+```
+
+# Computing heritability using LDSC
+```{bash}
+# loading plink/2.0
+module load plink/2.0
+
+# set working directory
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/h2
+
+# extracting random controls
+plink2 -bfile /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/bfile/FILTERED_all_combined_chr --keep /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/data/reference_panel/AABCG_subset/random_control.list --make-bed --out /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/data/reference_panel/AABCG_subset/processed_chr_all 
+
+# adding rsIDs to the bim file
+plink2 -bfile /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/data/reference_panel/AABCG_subset/processed_chr_all --update-name /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/PRScsx/bim_dictionary_OVERALL.txt 2 1 --make-bed --out /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/h2/AFR_REF
+
+# splitting up reference bim to chromosomes
+for chr in {1..22}
+do 
+  plink2 --bfile AFR_REF --chr $chr --make-bed --out AFR_REF_${chr}
+done
+
+# generating LDSC LD reference panels
+for i in `seq 1 22`
+do
+  sbatch --export=ARGS1=${i} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/generate_LD_matrix_LDSC.sh
+done
+
+# preparing summary statistics for ldsc
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+
+for (subtype in c("OVERALL","ERPOS","ERNEG","TNBC")) {
+  print(paste("PROCESSING ALTERNATE/EFFECT ALLELES FOR SUBTYPE:",subtype))
+  tmp_sumstats_AFR <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GWAS_sumstats/training_",subtype,"_PC_10.Status.glm.logistic.hybrid"),header=T,sep="\t")
+  
+  # obtaining OR for alternate allele
+  tmp_sumstats_AFR$INV_OR <- 1/tmp_sumstats_AFR$OR
+  tmp_sumstats_AFR$OR[tmp_sumstats_AFR$A1!=tmp_sumstats_AFR$ALT] <- tmp_sumstats_AFR$INV_OR[tmp_sumstats_AFR$A1!=tmp_sumstats_AFR$ALT]
+  
+  # obtaining AF for alternate allele
+  tmp_sumstats_AFR$ALT_FREQ <- 1-tmp_sumstats_AFR$A1_FREQ
+  tmp_sumstats_AFR$A1_FREQ[tmp_sumstats_AFR$A1!=tmp_sumstats_AFR$ALT] <- tmp_sumstats_AFR$ALT_FREQ[tmp_sumstats_AFR$A1!=tmp_sumstats_AFR$ALT]
+  
+  # now, make sure the A1 is equivalent to the alternate allele
+  tmp_sumstats_AFR$A1 <- tmp_sumstats_AFR$ALT
+  tmp_sumstats_AFR <- tmp_sumstats_AFR %>% select(-INV_OR,-ALT_FREQ)
+  tmp_sumstats_AFR$BETA <- log(tmp_sumstats_AFR$OR)
+  
+  # computing N_eff
+  tmp_sumstats_AFR$N_eff <- as.integer(1/(2*tmp_sumstats_AFR$A1_FREQ*(1-tmp_sumstats_AFR$A1_FREQ)*tmp_sumstats_AFR$`LOG(OR)_SE`^2))
+  
+  # rsid dictionary
+  rsid_dict <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/PRScsx/bim_dictionary_",subtype,".txt"),header=F)
+  colnames(rsid_dict) <- c("ID","snpid")
+  results <- inner_join(tmp_sumstats_AFR,rsid_dict,by=c("ID"))
+  
+  # obtaining A1 and A2 columns
+  results <- results %>% mutate(A2=ifelse(A1==ALT,REF,ALT))
+  # specifying an INFO of 1 for all SNPs to prevent filtering
+  results$imputation_r2 <- 1 
+  
+results <- results %>% 
+  mutate(MAF = ifelse(A1_FREQ>0.5,1-A1_FREQ, A1_FREQ)) %>%  
+  select(snpid,`#CHROM`,POS,A1,A2,OR,`LOG(OR)_SE`,P,imputation_r2,MAF,N_eff)
+
+# renaming column names
+colnames(results) <- c("snpid",
+  "CHR",
+  "bp",
+  "A1",
+  "A2",
+  "or",
+  "se",
+  "P",
+  "info",
+  "MAF",
+  "N")
+
+# importing hm3 SNP list
+w_hm3_updated.snplist <- (fread("/gpfs/data/huo-lab/BCAC/james.li/preconfluence/data/hm3_snplist/w_hm3_updated.snplist"))$rsid
+
+# writing out sumstats for LDSC
+write.table(results,file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/h2/sumstats/ALLSNP_",subtype,".txt"),quote=F,row.names=F,col.names=T)
+write.table(results %>% filter(snpid %in% w_hm3_updated.snplist) ,file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/h2/sumstats/hm3_",subtype,"_NO_FILTER.txt"),quote=F,row.names=F,col.names=T)
+
+# filtering MAF 0.01
+results <- results %>% filter(MAF >= 0.01)
+# writing out sumstats for LDSC MAF 0.01
+write.table(results,file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/h2/sumstats/ALLSNP_",subtype,"_0.01.txt"),quote=F,row.names=F,col.names=T)
+write.table(results %>% filter(snpid %in% w_hm3_updated.snplist) ,file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/h2/sumstats/hm3_",subtype,"_0.01.txt"),quote=F,row.names=F,col.names=T)
+
+# writing out sumstats for LDSC MAF 0.01 GENOME_WIDE_SIG
+write.table(results %>% filter(P<5E-8),file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/h2/sumstats/GENOME_WIDE_SIG_",subtype,"_0.01.txt"),quote=F,row.names=F,col.names=T)
+
+# filtering MAF 0.05
+results <- results %>% filter(MAF >= 0.05)
+# writing out sumstats for LDSC MAF 0.05
+write.table(results,file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/h2/sumstats/ALLSNP_",subtype,"_0.05.txt"),quote=F,row.names=F,col.names=T)
+write.table(results %>% filter(snpid %in% w_hm3_updated.snplist) ,file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/h2/sumstats/hm3_",subtype,"_0.05.txt"),quote=F,row.names=F,col.names=T)
+
+# writing out sumstats for LDSC MAF 0.05 GENOME_WIDE_SIG
+write.table(results %>% filter(P<5E-8),file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/h2/sumstats/GENOME_WIDE_SIG_",subtype,"_0.05.txt"),quote=F,row.names=F,col.names=T)
+}
+
+# computing heritability and munging summary statistics
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/h2/sumstats
+for i in *
+do
+  sbatch --export=ARGS1=${i} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/H2_MUNGE_SUMSTATS_COMPUTE_HERITABILITY.sh
+done
+
+# computing heritability of PRS
+sigma2toauc = function(x){   ifelse(x==0,0.50,round(pnorm(sqrt(0.5*x)),2)) }
+
+AUCvec <- c(0.6050824,0.620616048303442,0.61042443208364,0.6392839)
+subtypevec <- c("OVERALL","ERPOS","ERNEG","TNBC")
+for (i in 1:4) {
+AUC = AUCvec[i]
+subtype = subtypevec[i]
+h2 = 2*qnorm(AUC)^2
+print(paste(subtype,h2))
+}
+
+
+
+
+library(data.table)
+library(dplyr)
+library(ROCnReg)
+
+# defining all imported PRS model scoring outputs
+score_list <- c(
+  "OVERALL_PROPTUNE_ALLSUBTYPE.sscore",
+  "ERPOS_ENSEMBLE_FSS.sscore",
+  "ERNEG_ENSEMBLE_GLMNET.sscore",
+  "TNBC_XANCESTRY_PRSICE2.sscore"
+)
+
+####################################
+# compute sigma for each PRS model #
+####################################
+auc_df <- data.frame()
+for (current_PRS_model in score_list) {
+  # obtaining subtype string
+  subtype <- sub("_.*", "", current_PRS_model)
+  # importing score output
+  score_validate_df <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_SCORE_OUTPUT/",subtype,"/",current_PRS_model)) %>% select(`#IID`,SCORE)
+  # filter for eligible samples
+  if (subtype == "OVERALL") {
+    score_validate_df <- score_validate_df %>% filter(`#IID` %in% eligible_samples)
+  }
+  # importing validation set covariates
+  y_vad <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/validation_",subtype,".pheno_cov"),header=T)
+  y_vad$Status <- y_vad$Status-1
+  # joining imported PRS scores with validate covariates
+  reg_validate_df<-inner_join(score_validate_df,y_vad,by=c("#IID"))
+  # computing AUC of PRS
+  reg_validate_df$Status <- as.factor(reg_validate_df$Status)
+  output_AROC.sp <- AROC.sp(
+    formula.h = SCORE~Age+Platform+PC1+PC2+PC3+PC4+PC5+PC6+PC7+PC8+PC9+PC10,
+    group = "Status",
+    data = reg_validate_df,
+    tag.h = 0)
+  print(paste("Covariate-adjusted AUC:", output_AROC.sp$AUC[[1]]))
+  # calculating heritability 
+  tmp_auc_df <- data.frame(t(output_AROC.sp$AUC))
+  
+  # obtaining sigma list 
+  auc_df <- rbind(auc_df,tmp_auc_df)
+}
+
+# Create h2_df by applying the function to each element in auc_df
+h2_df <- apply(auc_df, c(1, 2), function(AUC) 2 * (qnorm(AUC)^2))
+h2_df <- as.data.frame(h2_df)
+h2_df <- h2_df %>% mutate((qh-ql)/3.92)
+rounded_h2_df <- round(h2_df, 3)
+
+
+# proportion of heritability captured by PRS
+0.1625684/0.5562
+0.188619777920769/0.7156
+0.157276833718947/0.535
+0.254249165829872/0.5829
+```
+
+# Examine number of SNPs among all overall PRS models
+```{r}
+setwd("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS/")
+
+snp_list <- c()
+file_list <- list.files()[grepl("OVERALL",list.files())]
+for (file in file_list) {
+  print(file)
+  tmp_snp_list <- (fread(file,header=F,sep="\t"))$V1
+  snp_list <- c(snp_list,tmp_snp_list)
+}
+unique_snp_list <- unique(snp_list)
+length(unique(snp_list))
+unique_snp_list_df <- data.frame(unique_snp_list)
+write.table(unique_snp_list_df,file="ALL_SNP_OVERALL.txt",quote=F,row.names=F,col.names=F)
+```
+
+# Examining correlation of PCs with ancestry
+```{r}
+###########################
+# loading packages and setting working directory
+library(data.table)
+library(tidyverse)
+library(readxl)
+setwd("/gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/PCA")
+
+###########################
+# assessing eigenvalues generated from PCA to determine the number of PCs to include 
+eigenval_vec <- fread("/gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/PCA/AABCG_PCA_50PCs.eigenval",header=F)$V1
+eigenval_df <- data.frame(eigenval_index = c(1:length(eigenval_vec)),eigenval = eigenval_vec)
+
+###########################
+# importing covariate data
+pheno_data <- data.frame(read_excel("/gpfs/data/huo-lab/AABCG/data/AABCG_pheno_clean_Jan2023_share.xlsx"))
+pheno_data <- pheno_data %>% select(`AABCGS_ID...1`,`Dataset...3`,Age_GWAS,Status,ER,PR,HER2,AFR_pro,Study)
+pheno_data$Status <- 3-pheno_data$Status
+colnames(pheno_data)[1] <- "Sample_Name"
+colnames(pheno_data)[2] <- "Dataset"
+
+# importing data of principal components
+eigenvec <- fread("/gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/PCA/AABCG_PCA_50PCs.eigenvec",header=T)
+colnames(eigenvec)[1] <- "Sample_Name"
+
+# joining covariate and PC data.frames by sample IID
+combined_cov <- inner_join(pheno_data,eigenvec, by = c("Sample_Name")) 
+
+# recoding the dataset variable 
+combined_cov$dataset_recode <- NA
+combined_cov$dataset_recode[combined_cov$Dataset=="Dataset_01_WGS"] <- "WGS" 
+combined_cov$dataset_recode[combined_cov$Dataset=="Dataset_02_WGS2"] <- "WGS" 
+combined_cov$dataset_recode[combined_cov$Dataset=="Dataset_03_MEGA_VANDY"] <- "MEGA" 
+combined_cov$dataset_recode[combined_cov$Dataset=="Dataset_04_MEGA_RP"] <- "MEGA" 
+combined_cov$dataset_recode[combined_cov$Dataset=="Dataset_05_MEGA_USC"] <- "MEGA" 
+combined_cov$dataset_recode[combined_cov$Dataset=="Dataset_06_AMBER"] <- "AMBER" 
+combined_cov$dataset_recode[combined_cov$Dataset=="Dataset_07_ROOT"] <- "ROOT" 
+combined_cov$dataset_recode[combined_cov$Dataset=="Dataset_08_AABC"] <- "AABC" 
+combined_cov$dataset_recode[combined_cov$Dataset=="Dataset_09_GBHS"] <- "GBHS" 
+combined_cov$dataset_recode[combined_cov$Dataset=="Dataset_10_BCAC_OncoArray"] <- "BCAC_OncoArray" 
+combined_cov$dataset_recode[combined_cov$Dataset=="Dataset_11_BCAC_iCOGS"] <- "BCAC_iCOGS" 
+
+###########################
+# assessing the relationship between global AFR ancestry proportion and the top 10 principal components
+correlation_vec <- c(
+    cor(combined_cov$AFR_pro, combined_cov$PC1),
+    cor(combined_cov$AFR_pro, combined_cov$PC2),
+    cor(combined_cov$AFR_pro, combined_cov$PC3),
+    cor(combined_cov$AFR_pro, combined_cov$PC4),
+    cor(combined_cov$AFR_pro, combined_cov$PC5),
+    cor(combined_cov$AFR_pro, combined_cov$PC6),
+    cor(combined_cov$AFR_pro, combined_cov$PC7),
+    cor(combined_cov$AFR_pro, combined_cov$PC8),
+    cor(combined_cov$AFR_pro, combined_cov$PC9),
+    cor(combined_cov$AFR_pro, combined_cov$PC10)
+)
+cor_AFR_PC_df <- data.frame(PC_index = c(1:10), correlation = correlation_vec)
+
+combined_cov$Continent <- "North America"
+combined_cov$Continent[combined_cov$Study=="NBCS" | combined_cov$Study=="WAABCS" | combined_cov$Study=="GBHS"] <- "Africa"
+
+combined_cov <- combined_cov %>% mutate(`Proportion African ancestry`=ifelse(AFR_pro>=0.8,"At least 80%","Less than 80%"))
+
+png("PC_Continent_Plot.png",units="in",height=5,width=5,res=1200)
+ggplot(combined_cov,aes(x=PC1,y=PC2,color=Continent)) + geom_point(alpha = 0.6) + theme_classic() + theme(legend.position="bottom")
+dev.off()
+
+png("PC_Ancestry_Plot.png",units="in",height=5,width=5,res=1200)
+ggplot(combined_cov,aes(x=PC1,y=PC2,color=`Proportion African ancestry`)) + geom_point(alpha = 0.6) + theme_classic() + theme(legend.position="bottom")
+dev.off()
+
+png("PC_Study_Plot.png",units="in",height=5,width=5,res=1200)
+ggplot(combined_cov,aes(x=PC1,y=PC2,color=Study)) + geom_point(alpha = 0.6) + theme_classic()
+dev.off()
+
+# making sample lists for individuals from NA and Africa
+sample_list_NA <- combined_cov %>% mutate(F1=0) %>% filter(Continent=="North America") %>% select(F1,Sample_Name)
+sample_list_Africa <- combined_cov %>% mutate(F1=0) %>% filter(Continent=="Africa") %>% select(F1,Sample_Name)
+
+# writing out these sample lists 
+write.table(sample_list_NA,file="/gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/sample_list_NA.list",quote=F,row.names=F,col.names = F,sep="\t")
+write.table(sample_list_Africa,file="/gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/sample_list_Africa.list",quote=F,row.names=F,col.names = F,sep="\t")
+
+# computing allele frequencies in this filtered file for future reference by continent
+system("plink2 -pfile /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/MASTER_FILES/ALL_VARIANT/ALL_VARIANT --keep /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/sample_list_NA.list --freq --out /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/AF_Continent_NA")
+system("plink2 -pfile /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/MASTER_FILES/ALL_VARIANT/ALL_VARIANT --keep /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/sample_list_Africa.list --freq --out /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/AF_Continent_Africa")
+system("plink2 -pfile /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/MASTER_FILES/ALL_VARIANT/ALL_VARIANT --freq --out /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/all_combined_chr/pfile/AF_Continent_ALL")
+```
+
+
+# Obtaining miscellaneous tables
+```{r}
+library(readxl)
+library(data.table)
+library(dplyr)
+
+table1_list = vector(mode="list")
+for (index in 1:3) {
+  subset=c("training","testing","validation")[index]
+  print(index)
+  # loading phenotype data
+  pheno_data <- data.frame(read_excel("/gpfs/data/huo-lab/AABCG/data/AABCG_pheno_clean_Jan2023_share.xlsx"))
+  pheno_data <- pheno_data %>% select(`AABCGS_ID...1`,`Dataset...3`,everything())
+  pheno_data$Status <- 3-pheno_data$Status
+  colnames(pheno_data)[1] <- "#IID"
+  colnames(pheno_data)[2] <- "Dataset"
+  
+  # reading in cases for each subset of the data
+  pheno_cov_2 <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/",subset,"_OVERALL.pheno_cov"),header=T) %>% filter(Status==2) %>% select(`#IID`,Platform)
+  pheno_data_2 <- pheno_data %>% select(`#IID`,Study)
+  join_2 <- inner_join(pheno_cov_2,pheno_data_2,by=c("#IID")) %>% group_by(Platform,Study) %>% summarise(n_case=n())
+  
+  # reading in controls for each subset of the data
+  pheno_cov_1 <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/",subset,"_OVERALL.pheno_cov"),header=T) %>% filter(Status==1) %>% select(`#IID`,Platform)
+  pheno_data_1 <- pheno_data %>% select(`#IID`,Study)
+  join_1 <- inner_join(pheno_cov_1,pheno_data_1,by=c("#IID")) %>% group_by(Platform,Study) %>% summarise(n_control=n())
+  
+  # obtaining tabulation for ERPOS
+  pheno_cov_2 <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/",subset,"_OVERALL.pheno_cov"),header=T) %>% filter(Status==2) %>% select(`#IID`,Platform)
+  pheno_data_ERPOS <- pheno_data %>% filter(ER==1) %>% select(`#IID`,Study)
+  join_ERPOS <- inner_join(pheno_cov_2,pheno_data_ERPOS,by=c("#IID")) %>% group_by(Platform,Study) %>% summarise(n_ERPOS=n())
+  # obtaining tabulation for ERNEG
+  pheno_cov_2 <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/",subset,"_OVERALL.pheno_cov"),header=T) %>% filter(Status==2) %>% select(`#IID`,Platform)
+  pheno_data_ERNEG <- pheno_data %>% filter(ER==2) %>% select(`#IID`,Study)
+  join_ERNEG <- inner_join(pheno_cov_2,pheno_data_ERNEG,by=c("#IID")) %>% group_by(Platform,Study) %>% summarise(n_ERNEG=n())
+  # obtaining tabulation for TNBC
+  pheno_cov_2 <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/",subset,"_OVERALL.pheno_cov"),header=T) %>% filter(Status==2) %>% select(`#IID`,Platform)
+  pheno_data_TNBC <- pheno_data %>% filter(ER==2,PR==2,HER2==2) %>% select(`#IID`,Study)
+  join_TNBC <- inner_join(pheno_cov_2,pheno_data_TNBC,by=c("#IID")) %>% group_by(Platform,Study) %>% summarise(n_TNBC=n())
+  
+  # obtaining tabulation for all cases, controls, and subtypes
+  table1<-full_join(join_TNBC,full_join(join_ERNEG,full_join(join_ERPOS,full_join(join_2,join_1,by=c("Platform","Study")),by=c("Platform","Study")),by=c("Platform","Study")),by=c("Platform","Study")) %>% replace(is.na(.), 0)  
+  
+  table1_list[[index]] <- table1 %>% select(Platform, Study, n_case,n_ERPOS,n_ERNEG,n_TNBC,n_control)
+  
+}
+
+table1_complete <- data.frame(full_join(table1_list[[1]],full_join(table1_list[[2]],table1_list[[3]],by=c("Platform","Study")),by=c("Platform","Study"))) %>% replace(is.na(.), 0)
+
+# writing out table 1
+write.table(table1_complete,file="/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/TABLE1.tsv",quote=F,row.names=F,col.names=T,sep="\t")
+```
+
+# Obtaining scoring files with rsIDs
+```{bash}
+# generating different converted scoring files for 1) all snps that can be liftover 2) only snps with rsids
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS
+for i in *
+do
+  echo ${i}
+  sbatch --export=ARGS1=${i} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/CONVERT_SCORE_FILES_LIFTOVER_GRCh37.sh
+done
+
+# generating a combined annotation scoring file
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS
+for i in *
+do
+  echo ${i}
+  sbatch --export=ARGS1=${i} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/CONVERT_SCORE_FILES_COMBINE_ALL_ANNOTATIONS.sh
+done
+
+# double checking these combined annotated files were not altered in any way and still have correct predictive ability for hg38
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS_LIFTOVER/ANNOTATED
+for i in *
+do
+  tail -n +2 ${i} | cut -f5,7,8 > ../DOUBLE_CHECK/SCORE_FILES/${i}
+  echo $i
+done
+
+# scoring files 
+cd /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS_LIFTOVER/DOUBLE_CHECK/SCORE_FILES
+for subtype in OVERALL ERPOS ERNEG TNBC
+do
+  for score_file in ${subtype}_*
+  do
+    sbatch --export=ARGS1=${subtype},ARGS2=${score_file} /gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/code/sbatch/DOUBLE_CHECK_ANNOTATE_SCORE_FILES.sh
+  done
+done
+
+
+
+# importing arguments and setting paths
+subtype=OVERALL
+score_prefix=OVERALL_PROPTUNE_ALLSUBTYPE #OVERALL_PROPTUNE_InternalProp 
+input_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/FINAL_PRS_MODELS
+output_score_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS_LIFTOVER/DOUBLE_CHECK/SCORE_OUTPUT/${subtype}
+pfile_path=/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/GENOME_WIDE_APPROACHES/pfile/combined_testing_validation_${subtype}
+
+# generating PRS scores for the testing and validation sets
+plink2 --pfile ${pfile_path} --score ${input_score_path}/${score_prefix} --out ${output_score_path}/${score_prefix}
+
+
+
+
+
+# computing AUCs 
+library(data.table)
+library(dplyr)
+library(ROCnReg)
+
+subtype="TNBC"
+
+# set working directory
+setwd(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS_LIFTOVER/DOUBLE_CHECK/SCORE_OUTPUT/",subtype))
+
+# initializing data.frame to store resulting AUCs
+AUC_DF <- data.frame(Approach=as.character(),AUC_lower=as.numeric(),AUC_center=as.numeric(),AUC_upper=as.numeric())
+
+###################################################
+# importing validation set covariates
+y_vad <- fread(paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/input/validation_",subtype,".pheno_cov"),header=T)
+y_vad$Status <- y_vad$Status-1
+PRS_score_list <- list.files()[grep("sscore",list.files())]
+PRS_score_list <- PRS_score_list[grep(subtype,PRS_score_list)]
+
+imported_scores <- vector(mode="list",length=length(PRS_score_list))
+
+for (i in 1:length(PRS_score_list)) {
+  print(i)
+  imported_scores[[i]] <- fread(PRS_score_list[i],header=T) %>% select(`#IID`,SCORE1_AVG)
+  colnames(imported_scores[[i]])[2] <- PRS_score_list[i]
+}
+
+combined_PRS_scores <- Reduce(full_join,imported_scores)
+combined_PRS_scores <- data.frame(combined_PRS_scores)
+rownames(combined_PRS_scores) <- combined_PRS_scores$X.IID
+colnames(combined_PRS_scores)[1] <- "#IID"
+scores_validate <- combined_PRS_scores[y_vad$`#IID`,]
+scores_validate <- scores_validate %>% select(-`#IID`)
+
+# joining imported PRS scores with validate covariates
+scores_validate_df <- scores_validate
+scores_validate_df$`#IID` <- rownames(scores_validate_df)
+reg_validate_df<-inner_join(scores_validate_df,y_vad,by=c("#IID"))
+
+# assembling data and covariates for the validation set
+current_reg_validate_df <- reg_validate_df
+SELECTED_PRS_LIST <- colnames(current_reg_validate_df)[grep(paste0(subtype,"_"),colnames(current_reg_validate_df))]
+
+# computing metrics of all PRS models for the specified subtype
+for (m in c(1:length(SELECTED_PRS_LIST))) {
+  print(paste("PROCESSING PRS",m,"of",length(SELECTED_PRS_LIST)))
+  SELECTED_PRS <- SELECTED_PRS_LIST[m]
+  
+  # computing covariate adjusted AUC
+  output_AROC.sp <- AROC.sp(
+  formula.h = paste0(SELECTED_PRS,"~Age+factor(Platform)+PC1+PC2+PC3+PC4+PC5+PC6+PC7+PC8+PC9+PC10"),
+    group = "Status",
+    data = current_reg_validate_df,
+    tag.h = 0)
+  print(paste("Covariate-adjusted AUC for",SELECTED_PRS,"method:", toString(signif(sort(as.numeric(output_AROC.sp$AUC)), digits = 4))))
+  
+  # identifying number of SNPs
+  SELECTED_PRS_STR <- gsub(".sscore","",SELECTED_PRS)
+  
+  TMP_AUC_DF<-data.frame(t(c(SELECTED_PRS,sort(as.numeric(output_AROC.sp$AUC)))))
+  colnames(TMP_AUC_DF) <- c("Approach","AUC_lower","AUC_center","AUC_upper")
+  AUC_DF <- rbind(AUC_DF,TMP_AUC_DF)
+}
+
+print(AUC_DF %>% arrange(desc(AUC_center)))
+save(AUC_DF,file=paste0("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS_LIFTOVER/DOUBLE_CHECK/SCORE_AUC/",subtype,".RData"))
+###############################
+
+
+# identifying number of liftover and rsid SNPs for each scoring file
+library(data.table)
+library(dplyr)
+
+setwd("/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS_LIFTOVER/ANNOTATED")
+
+prs_model_list <- list.files()
+size_all <- c()
+size_37 <- c()
+size_rsid <- c()
+
+for (i in 1:length(prs_model_list)) {
+  tmp_prs <- fread(prs_model_list[i])
+  size_all <- c(size_all,nrow(tmp_prs))
+  size_37 <- c(size_37,nrow(tmp_prs %>% filter(id37!="")))
+  size_rsid <- c(size_rsid,nrow(tmp_prs %>% filter(rsid!="")))
+}
+
+df <- data.frame(prs_model_list,size_all, size_37, size_rsid)
+
+# creating master list for wisdom
+s1 <- fread("OVERALL_XSUBTYPE_FSS_0.05") %>% filter(id37!="") %>% select(-pos38,-id38) %>% rename(EffectSize_OVERALL=EffectSize) %>% select(chr,pos37,id37,rsid,EffectAllele,EffectAllele_Freq,EffectSize_OVERALL)
+s2 <- fread("ERPOS_XSUBTYPE_FSS_0.05") %>% filter(id37!="") %>% select(-pos38,-id38,-rsid,-pos37,-chr,-EffectAllele_Freq) %>% rename(EffectSize_ERPOS=EffectSize)
+s3 <- fread("ERNEG_XSUBTYPE_FSS_0.05") %>% filter(id37!="") %>% select(-pos38,-id38,-rsid,-pos37,-chr,-EffectAllele_Freq) %>% rename(EffectSize_ERNEG=EffectSize)
+s4 <- fread("TNBC_XSUBTYPE_FSS_0.05") %>% filter(id37!="") %>% select(-pos38,-id38,-rsid,-pos37,-chr,-EffectAllele_Freq) %>% rename(EffectSize_TNBC=EffectSize)
+join1<-inner_join(s1,s2,by=c("id37","EffectAllele"))
+join2<-inner_join(s3,s4,by=c("id37","EffectAllele"))
+all_join<-inner_join(join1,join2,by=c("id37","EffectAllele"))
+# writing out results
+write.table(all_join,file="/gpfs/data/huo-lab/BCAC/james.li/PRS_AABCG/output/CALIBRATION_FINAL_PRS_MODELS_LIFTOVER/WISDOM_145k/SNP145k_BRCh37_logOR.tsv",quote=F,row.names=F,col.names=T,sep="\t")
+```
