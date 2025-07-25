@@ -7,6 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem-per-cpu=32gb
+#SBATCH --partition=tier2q
 
 # loading modules 
 module load gcc/12.1.0
