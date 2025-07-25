@@ -1,0 +1,372 @@
+---
+title: "Absolute Risk Calculation: PRS + Family History" 
+author: "Dezheng Huo" 
+date: '2024-06-28'
+fontsize: 9pt
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+header-includes: \usepackage{pdfpages}
+geometry: margin=0.5in
+fig_crop: no
+---
+
+```{r setup, include=FALSE}
+#Load package
+library(data.table)
+library(readr)
+library(dplyr)
+library("tidyverse")
+library(iCARE)
+library(table1)
+library(pROC)
+library(ROCnReg)
+library(readxl)
+```
+## [Method 2] Calculate absolute risk using iCare method
+The life-time risk estimated from iCARE is based on PRS profile in validaiton set. It also rely on odds ratio. It does not matter if the PRS is calibrated or not. Family history profile is assumed controls from entire AABCG (9.4%).
+### Functions defined
+```{r}
+#sigma <- qnorm(0.63)*sqrt(2)
+
+set.seed(365895)
+
+cat("Numbers with positive family hisotry", 1e6*0.094) 
+
+pheno2 =  cbind.data.frame(case=c(rep(0, 1e6)), PRS=rnorm(1e6, mean=0, sd=1), 
+                     famhis2=c(rep(0, 906000), rep(1, 94000))) 
+
+## define the function of life time risk calculation
+calculate_LT_risk <- function(bc_inc, mort_inc, startAge, interval, OR1, OR2) {
+  
+  sublist1<-list(name="PRS",type="continuous")
+  sublist2<-list(name="famhis2",type="factor",levels=c('0','1'),ref='0')
+
+  new_cov_prof1 <- pheno2 %>% select(PRS, famhis2)
+  head(new_cov_prof1)
+  ref_cov_dat1 <- pheno2 %>% filter(case==0) %>% select(PRS, famhis2)
+  bc_model_formula <- case ~ PRS + as.factor(famhis2)
+
+  bc_model_cov_info <-list(sublist1, sublist2)
+  bc_model_log_or <- c(log(OR1), log(OR2)) 
+  names(bc_model_log_or) = c('PRS', 'as.factor(famhis2)1')
+  bc_model_log_or
+
+  res_covs_snps = computeAbsoluteRisk(model.formula=bc_model_formula, 
+                                    model.cov.info=bc_model_cov_info, 
+                                    model.log.RR=bc_model_log_or, 
+                                    model.ref.dataset=ref_cov_dat1, 
+                                    model.disease.incidence.rates=bc_inc,
+                                    model.competing.incidence.rates=mort_inc,
+                                    apply.age.start=startAge, 
+                                    apply.age.interval.length=interval,
+                                    apply.cov.profile=new_cov_prof1, 
+                                    return.refs.risk=TRUE)
+
+summary(res_covs_snps)
+#plot(res_covs_snps, main="20-year risk: PRS + family history")
+#head(res_covs_snps$details, 3)
+
+  new_cov_auc <- cbind(pheno2, risk80B = as.numeric(res_covs_snps$risk))
+  
+  print("Model with PRS + famhis2")
+  print("Correlation between the two risk scores")
+  print(cor(new_cov_auc[,c(2:4)])) 
+  
+  return(new_cov_auc)
+}
+
+
+## Define the function of risk cutoff
+ calculate_perc <- function(data, perc.u){
+
+  perc.v <- c(perc.u[-1], 1) 
+  prs_cat <- paste0(perc.u*100, "-", perc.v*100, "%") 
+  data <- data[data$case==0, ]
+  
+  risk.percA <- quantile(data$PRS, c(perc.u, 1)) 
+  print(round(risk.percA, digits=5)) 
+  data$PRS.c <- cut(data$PRS, breaks=risk.percA, right=T, include.lowest=T, labels=prs_cat)
+
+  risk.meanB <- as.data.frame(data %>% filter(famhis2==1) %>% 
+      group_by(PRS.c) %>%
+      summarise_at(vars(risk80B), list(FamPos = mean)) ) 
+
+  risk.meanC <- as.data.frame(data %>% filter(famhis2==0) %>% 
+      group_by(PRS.c) %>%
+      summarise_at(vars(risk80B), list(FamNeg = mean)) ) 
+
+  risk.mean <- cbind(risk.meanB, risk.meanC)
+  risk.mean <- risk.mean[,c(1,2,4)]
+  print(risk.mean)
+  return(risk.mean)
+ }
+ 
+```
+### BC incidence from SEER & mortality from other diseases from CDC
+The incidence of BC are from from SEER22 2017-2021 data
+The mortality rates are from CDC NCHS WONDER, 2017-2020
+```{r}
+## import data (data downloaded from SEER and CDC, reorganized in excel)
+age_group_data_Black <- read_excel("G:/BCAC/james.li/PRS_AABCG/code/rscripts/DH_code/BreastCancerIncidence2021.xlsx")
+age_black <- cbind(age_group_data_Black[, c(1,2)],
+                   mort=age_group_data_Black$Total_mortality-age_group_data_Black$BC_mortality) 
+age_black1 <- age_black[rep(row.names(age_black), each = 5), ]
+age_black1[, 2:3] <- age_black1[, 2:3]/1e5
+
+age_black_ERp <- cbind(age_group_data_Black[, c(1,6)],
+                   mort=age_group_data_Black$Total_mortality-age_group_data_Black$BC_mortality) 
+age_black_ERp1 <- age_black_ERp[rep(row.names(age_black_ERp), each = 5), ]
+age_black_ERp1[, 2:3] <- age_black_ERp1[, 2:3]/1e5
+
+age_black_ERn <- cbind(age_group_data_Black[, c(1,7)],
+                   mort=age_group_data_Black$Total_mortality-age_group_data_Black$BC_mortality) 
+age_black_ERn1 <- age_black_ERn[rep(row.names(age_black_ERn), each = 5), ]
+age_black_ERn1[, 2:3] <- age_black_ERn1[, 2:3]/1e5
+
+age_black_TNBC <- cbind(age_group_data_Black[, c(1,8)],
+                   mort=age_group_data_Black$Total_mortality-age_group_data_Black$BC_mortality) 
+age_black_TNBC1 <- age_black_TNBC[rep(row.names(age_black_TNBC), each = 5), ]
+age_black_TNBC1[, 2:3] <- age_black_TNBC1[, 2:3]/1e5
+
+```
+### Risk Calculation: Overall BC
+```{r}
+rate_inc <- cbind(c(0:89),  c(rep(0,20), age_black1[,2]) )
+rate_mort <- cbind(c(0:89), c(rep(0,20), age_black1[,3]) )
+
+result_OV <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, startAge=20, interval=60, OR1=1.509951, OR2=3.058138)
+ 
+result_OV <- result_OV %>% mutate(group= case_when (famhis2 == 0 ~ "No",
+                                                 famhis2 == 1 ~ "Yes"))
+table1(~ risk80B | group, data=result_OV, caption="Overall BC risk by family history: Age 20-80")
+
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_OV <- calculate_perc(data=result_OV, perc.u=perc.low) 
+
+table(result_OV$risk80B>0.5, result_OV$famhis2)  
+result_OV$risk80B[result_OV$risk80B>0.5] <- 0.5 
+result_OV$risk80 <- result_OV$risk80B*100
+
+ ggplot(result_OV, aes(x = risk80, fill = group)) +
+  geom_density(aes(y = after_stat(count)/sum(count)), alpha = 0.4) +
+  labs(title = "  Overall breast cancer",
+       x = "Lifetime risk (%)",
+       y = "Density", 
+       fill="Family History") +
+  scale_x_continuous(breaks = seq(0, 50, by = 10)) +
+  theme_minimal() + theme_classic() + theme(legend.position = c(.85, .85))
+ 
+ ggsave("G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Density_LT_OVERALL.png", width = 5, height = 3.5, dpi = 1200)
+ 
+
+result_OV2 <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, startAge=40, interval=10, OR1=1.509951, OR2=3.058138)
+ 
+result_OV2 <- result_OV2 %>% mutate(group= case_when (famhis2 == 0 ~ "No",
+                                                 famhis2 == 1 ~ "Yes"))
+table1(~ risk80B | group, data=result_OV2, caption="Overall BC risk by family history: Age 40-50")
+
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_OV2 <- calculate_perc(data=result_OV2, perc.u=perc.low) 
+
+table(result_OV2$risk80B>0.08, result_OV2$famhis2)  
+result_OV2$risk80B[result_OV2$risk80B>0.08] <- 0.08
+result_OV2$risk80 <- result_OV2$risk80B*100
+
+ ggplot(result_OV2, aes(x = risk80, fill = group)) +
+  geom_density(aes(y = after_stat(count)/sum(count)), alpha = 0.4) +
+  labs(title = "  Overall breast cancer",
+       x = "10-year risk for women at age 40 (%)",
+       y = "Density", 
+       fill="Family History") +
+  scale_x_continuous(breaks = seq(0, 8, by = 1)) +
+    theme_minimal() + theme_classic() + theme(legend.position = c(.85, .85)) 
+ 
+ ggsave("G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Density_age40_10yr_OVERALL.png", width = 5, height = 3.5, dpi = 1200)
+
+ out_OV <- cbind(perc_OV, perc_OV2[, 2:3])
+ colnames(out_OV) <- c('PRS.c', 'LT_FamPos', 'LT_FamNeg', 'y10_FamPos', 'y10_FamNeg') 
+ write.csv(out_OV, "G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Risk_FamilyHistory_OVERALL.csv", row.names = F)
+ 
+``` 
+
+### ER+ BC 
+```{r}
+rate_inc <- cbind(c(0:89),  c(rep(0,20), age_black_ERp1[,2]) )
+rate_mort <- cbind(c(0:89), c(rep(0,20), age_black_ERp1[,3]) )
+
+result_ERp <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, OR1=1.557937, OR2=3.014389, startAge=20, interval=60)
+ 
+result_ERp <- result_ERp %>% mutate(group= case_when (famhis2 == 0 ~ "No",
+                                                 famhis2 == 1 ~ "Yes"))
+table1(~ risk80B | group, data=result_ERp, caption="ER+ BC risk by family history: Age 20-80")
+
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_ERp <- calculate_perc(data=result_ERp, perc.u=perc.low) 
+
+table(result_ERp$risk80B>0.45, result_ERp$famhis2)  
+result_ERp$risk80B[result_ERp$risk80B>0.45] <- 0.45 
+result_ERp$risk80 <- result_ERp$risk80B*100
+
+ ggplot(result_ERp, aes(x = risk80, fill = group)) +
+  geom_density(aes(y = after_stat(count)/sum(count)), alpha = 0.4) +
+  labs(title = "  ER+ breast cancer",
+       x = "Lifetime risk (%)",
+       y = "Density", 
+       fill="Family History") +
+  scale_x_continuous(breaks = seq(0, 50, by = 10)) +
+    theme_minimal() + theme_classic() + theme(legend.position = c(.85, .85)) 
+ 
+ ggsave("G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Density_LT_ERPOS.png", width = 5, height = 3.5, dpi = 1200)
+ 
+
+result_ERp2 <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, startAge=40, interval=10, OR1=1.557937, OR2=3.014389)
+ 
+result_ERp2 <- result_ERp2 %>% mutate(group= case_when (famhis2 == 0 ~ "No",
+                                                 famhis2 == 1 ~ "Yes"))
+table1(~ risk80B | group, data=result_ERp2, caption="ER+ BC risk by family history: Age 40-50")
+
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_ERp2 <- calculate_perc(data=result_ERp2, perc.u=perc.low) 
+
+table(result_ERp2$risk80B>0.075, result_ERp2$famhis2)  
+result_ERp2$risk80B[result_ERp2$risk80B>0.075] <- 0.075
+result_ERp2$risk80 <- result_ERp2$risk80B*100
+
+ ggplot(result_ERp2, aes(x = risk80, fill = group)) +
+  geom_density(aes(y = after_stat(count)/sum(count)), alpha = 0.4) +
+  labs(title = "  ER+ breast cancer",
+       x = "10-year risk for women at age 40 (%)",
+       y = "Density", 
+       fill="Family History") +
+  scale_x_continuous(breaks = seq(0, 7, by = 1)) +
+    theme_minimal() + theme_classic() + theme(legend.position = c(.85, .85)) 
+ 
+ ggsave("G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Density_age40_10yr_ERPOS.png", width = 5, height = 3.5, dpi = 1200)
+ 
+ out_ERp <- cbind(perc_ERp, perc_ERp2[, 2:3])
+ colnames(out_ERp) <- c('PRS.c', 'LT_FamPos', 'LT_FamNeg', 'y10_FamPos', 'y10_FamNeg') 
+ write.csv(out_ERp, "G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Risk_FamilyHistory_ERPOS.csv", row.names = F)
+ 
+``` 
+### ER- BC 
+```{r}
+rate_inc <- cbind(c(0:89),  c(rep(0,20), age_black_ERn1[,2]) )
+rate_mort <- cbind(c(0:89), c(rep(0,20), age_black_ERn1[,3]) )
+
+result_ERn <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, OR1=1.455197, OR2=2.641937, startAge=20, interval=60)
+ 
+result_ERn <- result_ERn %>% mutate(group= case_when (famhis2 == 0 ~ "No",
+                                                 famhis2 == 1 ~ "Yes"))
+table1(~ risk80B | group, data=result_ERn, caption="ER+ BC risk by family history: Age 20-80")
+
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_ERn <- calculate_perc(data=result_ERn, perc.u=perc.low) 
+
+table(result_ERn$risk80B>0.18, result_ERn$famhis2)  
+result_ERn$risk80B[result_ERn$risk80B>0.18] <- 0.18 
+result_ERn$risk80 <- result_ERn$risk80B*100
+
+ ggplot(result_ERn, aes(x = risk80, fill = group)) +
+  geom_density(aes(y = after_stat(count)/sum(count)), alpha = 0.4) +
+  labs(title = "  ER- breast cancer",
+       x = "Lifetime risk (%)",
+       y = "Density", 
+       fill="Family History") +
+  scale_x_continuous(breaks = seq(0, 15, by = 5)) +
+    theme_minimal() + theme_classic() + theme(legend.position = c(.85, .85)) 
+ 
+ ggsave("G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Density_LT_ERNEG.png", width = 5, height = 3.5, dpi = 1200)
+ 
+ 
+result_ERn2 <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, OR1=1.455197, OR2=2.641937, startAge=40, interval=10)
+ 
+result_ERn2 <- result_ERn2 %>% mutate(group= case_when (famhis2 == 0 ~ "No",
+                                                 famhis2 == 1 ~ "Yes"))
+table1(~ risk80B | group, data=result_ERn2, caption="ER- BC risk by family history: Age 40-50")
+
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_ERn2 <- calculate_perc(data=result_ERn2, perc.u=perc.low) 
+
+table(result_ERn2$risk80B>0.027, result_ERn2$famhis2)  
+result_ERn2$risk80B[result_ERn2$risk80B>0.027] <- 0.027
+result_ERn2$risk80 <- result_ERn2$risk80B*100
+
+ ggplot(result_ERn2, aes(x = risk80, fill = group)) +
+  geom_density(aes(y = after_stat(count)/sum(count)), alpha = 0.4) +
+  labs(title = "  ER- breast cancer",
+       x = "10-year risk for women at age 40 (%)",
+       y = "Density", 
+       fill="Family History") +
+  scale_x_continuous(breaks = seq(0, 2.5, by = 0.5)) +
+    theme_minimal() + theme_classic() + theme(legend.position = c(.85, .85)) 
+ 
+ ggsave("G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Density_age40_10yr_ERNEG.png", width = 5, height = 3.5, dpi = 1200)
+ 
+ out_ERn <- cbind(perc_ERn, perc_ERn2[, 2:3])
+ colnames(out_ERn) <- c('PRS.c', 'LT_FamPos', 'LT_FamNeg', 'y10_FamPos', 'y10_FamNeg') 
+ write.csv(out_ERn, "G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Risk_FamilyHistory_ERNEG.csv", row.names = F)
+ 
+``` 
+
+### TNBC 
+```{r}
+rate_inc <- cbind(c(0:89),  c(rep(0,20), age_black_TNBC1[,2]) )
+rate_mort <- cbind(c(0:89), c(rep(0,20), age_black_TNBC1[,3]) )
+
+result_TNBC <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, OR1=1.655554, OR2=2.879107, startAge=20, interval=60)
+
+result_TNBC <- result_TNBC %>% mutate(group= case_when (famhis2 == 0 ~ "No",
+                                                        famhis2 == 1 ~ "Yes"))
+table1(~ risk80B | group, data=result_TNBC, caption="TNBC risk by family history: Age 20-80")
+
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_TNBC <- calculate_perc(data=result_TNBC, perc.u=perc.low) 
+
+table(result_TNBC$risk80B>0.12, result_TNBC$famhis2)  
+result_TNBC$risk80B[result_TNBC$risk80B>0.12] <- 0.12 
+result_TNBC$risk80 <- result_TNBC$risk80B*100
+
+ggplot(result_TNBC, aes(x = risk80, fill = group)) +
+  geom_density(aes(y = after_stat(count)/sum(count)), alpha = 0.4) +
+  labs(title = "  Triple-negative breast cancer",
+       x = "Lifetime risk (%)",
+       y = "Density", 
+       fill="Family History") +
+  scale_x_continuous(breaks = seq(0, 12, by = 2)) +
+  theme_minimal() + theme_classic() + theme(legend.position = c(.85, .85)) 
+
+ggsave("G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Density_LT_TNBC.png", width = 5, height = 3.5, dpi = 1200)
+
+
+result_TNBC2 <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, OR1=1.655554, OR2=2.879107, startAge=40, interval=10)
+
+result_TNBC2 <- result_TNBC2 %>% mutate(group= case_when (famhis2 == 0 ~ "No",
+                                                          famhis2 == 1 ~ "Yes"))
+table1(~ risk80B | group, data=result_TNBC2, caption="TNBC risk by family history: Age 40-50")
+
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_TNBC2 <- calculate_perc(data=result_TNBC2, perc.u=perc.low) 
+
+table(result_TNBC2$risk80B>0.022, result_TNBC2$famhis2)  
+result_TNBC2$risk80B[result_TNBC2$risk80B>0.022] <- 0.022
+result_TNBC2$risk80 <- result_TNBC2$risk80B*100
+
+ggplot(result_TNBC2, aes(x = risk80, fill = group)) +
+  geom_density(aes(y = after_stat(count)/sum(count)), alpha = 0.4) +
+  labs(title = "  Triple-negative breast cancer",
+       x = "10-year risk for women at age 40 (%)",
+       y = "Density", 
+       fill="Family History") +
+  scale_x_continuous(breaks = seq(0, 2, by = 0.5)) +
+  theme_minimal() + theme_classic() + theme(legend.position = c(.85, .85))
+
+ggsave("G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Density_age40_10yr_TNBC.png", width = 5, height = 3.5, dpi = 1200)
+
+out_TNBC <- cbind(perc_TNBC, perc_TNBC2[, 2:3])
+colnames(out_TNBC) <- c('PRS.c', 'LT_FamPos', 'LT_FamNeg', 'y10_FamPos', 'y10_FamNeg') 
+write.csv(out_TNBC, "G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Risk_FamilyHistory_TNBC.csv", row.names = F)
+
+ 
+```

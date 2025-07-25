@@ -1,0 +1,460 @@
+---
+title: "Absolute Risk Calculation: Black vs White" 
+author: "Dezheng Huo" 
+date: '2024-06-29'
+fontsize: 9pt
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+header-includes: \usepackage{pdfpages}
+geometry: margin=0.5in
+fig_crop: no
+---
+
+```{r setup, include=FALSE}
+#Load package
+library(data.table)
+library(readr)
+library(dplyr)
+library("tidyverse")
+library(iCARE)
+library(table1)
+library(pROC)
+library(ROCnReg)
+library(readxl)
+```
+## [Method 2] Calculate absolute risk using iCare method
+The life-time risk estimated from iCARE is based on PRS profile in validaiton set. It also rely on odds ratio. It does not matter if the PRS is calibrated or not. Family history profile is assumed controls from entire AABCG (9.4%).
+### Functions defined
+```{r}
+#sigma <- qnorm(0.63)*sqrt(2)
+
+set.seed(365895)
+
+cat("Numbers with positive family hisotry", 1e6*0.094) 
+
+pheno2 =  cbind.data.frame(case=c(rep(0, 1e6)), PRS=rnorm(1e6, mean=0, sd=1), 
+                     famhis2=c(rep(0, 906000), rep(1, 94000))) 
+
+## define the function of life time risk calculation
+## define the function of life time risk calculation
+calculate_LT_risk <- function(bc_inc, mort_inc, startAge, interval, OR1, OR2) {
+  
+  sublist1<-list(name="PRS",type="continuous")
+  sublist2<-list(name="famhis2",type="factor",levels=c('0','1'),ref='0')
+
+  new_cov_prof1 <- pheno2 %>% select(PRS, famhis2)
+  head(new_cov_prof1)
+  ref_cov_dat1 <- pheno2 %>% filter(case==0) %>% select(PRS, famhis2)
+  bc_model_formula <- case ~ PRS + as.factor(famhis2)
+
+  bc_model_cov_info <-list(sublist1, sublist2)
+  bc_model_log_or <- c(log(OR1), log(OR2)) 
+  names(bc_model_log_or) = c('PRS', 'as.factor(famhis2)1')
+  bc_model_log_or
+
+  res_covs_snps = computeAbsoluteRisk(model.formula=bc_model_formula, 
+                                    model.cov.info=bc_model_cov_info, 
+                                    model.log.RR=bc_model_log_or, 
+                                    model.ref.dataset=ref_cov_dat1, 
+                                    model.disease.incidence.rates=bc_inc,
+                                    model.competing.incidence.rates=mort_inc,
+                                    apply.age.start=startAge, 
+                                    apply.age.interval.length=interval,
+                                    apply.cov.profile=new_cov_prof1, 
+                                    return.refs.risk=TRUE)
+
+summary(res_covs_snps)
+#plot(res_covs_snps, main="20-year risk: PRS + family history")
+#head(res_covs_snps$details, 3)
+
+  new_cov_auc <- cbind(pheno2, risk80B = as.numeric(res_covs_snps$risk))
+  
+  print("Model with PRS + famhis2")
+  print("Correlation between the two risk scores")
+  print(cor(new_cov_auc[,c(2:4)])) 
+  
+  return(new_cov_auc)
+}
+
+## Define the function to calcuate average risk per PRS percentiles.
+ calculate_perc <- function(data, perc.u){
+
+  perc.v <- c(perc.u[-1], 1) 
+  prs_cat <- paste0(perc.u*100, "-", perc.v*100, "%") 
+  data <- data[data$case==0, ]
+  
+  risk.percA <- quantile(data$PRS, c(perc.u, 1)) 
+  print(round(risk.percA, digits=5)) 
+  data$PRS.c <- cut(data$PRS, breaks=risk.percA, right=T, include.lowest=T, labels=prs_cat)
+
+  risk.meanA <- as.data.frame(data %>% 
+      group_by(PRS.c) %>%
+      summarise_at(vars(risk80B), list(Total = mean)) ) 
+    
+  risk.meanB <- as.data.frame(data %>% filter(famhis2==1) %>% 
+      group_by(PRS.c) %>%
+      summarise_at(vars(risk80B), list(FamPos = mean)) ) 
+
+  risk.meanC <- as.data.frame(data %>% filter(famhis2==0) %>% 
+      group_by(PRS.c) %>%
+      summarise_at(vars(risk80B), list(FamNeg = mean)) ) 
+
+  risk.mean <- cbind(risk.meanA, risk.meanB, risk.meanC)
+  risk.mean <- risk.mean[,c(1,2,4,6)]
+  print(risk.mean)
+  return(risk.mean)
+ }
+ 
+```
+### BC incidence from SEER & mortality from other diseases from CDC
+The incidence of BC are from from SEER22 2017-2021 data
+Suggested Citation: 
+SEER*Explorer: An interactive website for SEER cancer statistics [Internet]. Surveillance Research Program, National Cancer Institute; 2024 Apr 17. [updated: 2024 Jun 27; cited 2024 Jun 29]. Available from: https://seer.cancer.gov/statistics-network/explorer/. Data source(s): SEER Incidence Data, November 2023 Submission (1975-2021), SEER 22 registries.
+
+The mortality rates are from CDC NCHS WONDER, 2017-2020
+```{r}
+## import data (data downloaded from SEER and CDC, reorganized in excel)
+age_group_data_Black <- read_excel("G:/BCAC/james.li/PRS_AABCG/code/rscripts/DH_code/BreastCancerIncidence2021.xlsx")
+age_black <- cbind(age_group_data_Black[, c(1,2)],
+                   mort=age_group_data_Black$Total_mortality-age_group_data_Black$BC_mortality) 
+age_black1 <- age_black[rep(row.names(age_black), each = 5), ]
+age_black1[, 2:3] <- age_black1[, 2:3]/1e5
+
+age_black_ERp <- cbind(age_group_data_Black[, c(1,6)],
+                   mort=age_group_data_Black$Total_mortality-age_group_data_Black$BC_mortality) 
+age_black_ERp1 <- age_black_ERp[rep(row.names(age_black_ERp), each = 5), ]
+age_black_ERp1[, 2:3] <- age_black_ERp1[, 2:3]/1e5
+
+age_black_ERn <- cbind(age_group_data_Black[, c(1,7)],
+                   mort=age_group_data_Black$Total_mortality-age_group_data_Black$BC_mortality) 
+age_black_ERn1 <- age_black_ERn[rep(row.names(age_black_ERn), each = 5), ]
+age_black_ERn1[, 2:3] <- age_black_ERn1[, 2:3]/1e5
+
+age_black_TNBC <- cbind(age_group_data_Black[, c(1,8)],
+                   mort=age_group_data_Black$Total_mortality-age_group_data_Black$BC_mortality) 
+age_black_TNBC1 <- age_black_TNBC[rep(row.names(age_black_TNBC), each = 5), ]
+age_black_TNBC1[, 2:3] <- age_black_TNBC1[, 2:3]/1e5
+
+age_group_data <- read_excel("G:/BCAC/james.li/PRS_AABCG/code/rscripts/DH_code/Incidence_otherRaces.xlsx")
+names(age_group_data)
+#age_group_data  ## per 100,000
+age_white <- cbind(age_group_data[, 1:2], 
+                   mort=age_group_data$Total_mortality_White-age_group_data$BC_mortality_White) 
+age_white1 <- age_white[rep(row.names(age_white), each = 5), ]
+age_white1[, 2:3] <- age_white1[, 2:3]/1e5
+
+age_white_ERp <- cbind(age_group_data[, c(1,11)],
+                    mort=age_group_data$Total_mortality_White-age_group_data$BC_mortality_White) 
+age_white_ERp1 <- age_white_ERp[rep(row.names(age_white_ERp), each = 5), ]
+age_white_ERp1[, 2:3] <- age_white_ERp1[, 2:3]/1e5
+
+age_white_ERn <- cbind(age_group_data[, c(1,12)],
+                    mort=age_group_data$Total_mortality_White-age_group_data$BC_mortality_White) 
+age_white_ERn1 <- age_white_ERn[rep(row.names(age_white_ERn), each = 5), ]
+age_white_ERn1[, 2:3] <- age_white_ERn1[, 2:3]/1e5 
+
+age_white_TNBC <- cbind(age_group_data[, c(1,13)],
+                    mort=age_group_data$Total_mortality_White-age_group_data$BC_mortality_White) 
+age_white_TNBC1 <- age_white_TNBC[rep(row.names(age_white_TNBC), each = 5), ]
+age_white_TNBC1[, 2:3] <- age_white_TNBC[, 2:3]/1e5
+
+
+```
+### Overall BC in Black and White
+```{r}
+## Blacks
+age_black 
+rate_inc <- cbind(c(0:89),  c(rep(0,20), age_black1[,2]) )
+rate_mort <- cbind(c(0:89), c(rep(0,20), age_black1[,3]) )
+
+result_OV <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, startAge=20, interval=60, OR1=1.488738, OR2=1)
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_OV <- calculate_perc(data=result_OV, perc.u=perc.low) 
+
+## White
+age_white
+rate_inc <- cbind(c(0:89),  c(rep(0,20), age_white1[,2]) )
+rate_mort <- cbind(c(0:89), c(rep(0,20), age_white1[,3]) )
+
+result_OV_white <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, startAge=20, interval=60, OR1=1.61, OR2=1)
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_OV_white <- calculate_perc(data=result_OV_white, perc.u=perc.low) 
+
+## Comparison of Black and White
+  cbind.data.frame(PRS.c=perc_OV$PRS.c, Black=perc_OV[, c(2)]*100, White=perc_OV_white$Total*100)
+ 
+  data1 <- rbind.data.frame(cbind.data.frame(Race="African American", risk80B=result_OV$risk80B), 
+                            cbind.data.frame(Race="European American", risk80B=result_OV_white$risk80B))
+  table1(~ risk80B | Race, data=data1, caption="Overall BC risk by race: Age 20-80", overall=F)
+
+table(data1$risk80B>0.45, data1$Race)  
+data1$risk80 <- data1$risk80B*100 
+data1$risk80[data1$risk80>45] <- 45
+
+ ggplot(data1, aes(x = risk80, fill = Race)) +
+  geom_density(alpha = 0.4) +
+  labs(
+       x = "Lifetime risk of overall breast cancer (%)",
+       y = "Density", 
+       fill="Race") +
+  scale_x_continuous(breaks = seq(0, 40, by = 5)) +
+  theme_minimal() + theme_classic() + theme(legend.position = c(.80, .85))
+ 
+ ggsave("G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Density_BlackWhite_LT_OVERALL.png", width = 5, height = 3.5, dpi = 1200)
+ 
+``` 
+### ER+ BC in Black and White
+```{r}
+## Blacks
+age_black_ERp 
+rate_inc <- cbind(c(0:89),  c(rep(0,20), age_black_ERp1[,2]) )
+rate_mort <- cbind(c(0:89), c(rep(0,20), age_black_ERp1[,3]) )
+
+result_ERp <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, startAge=20, interval=60, OR1=1.526953, OR2=1)
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_ERp <- calculate_perc(data=result_ERp, perc.u=perc.low) 
+
+## White
+age_white_ERp
+rate_inc <- cbind(c(0:89),  c(rep(0,20), age_white_ERp1[,2]) )
+rate_mort <- cbind(c(0:89), c(rep(0,20), age_white_ERp1[,3]) )
+
+result_ERp_white <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, startAge=20, interval=60, OR1=1.68, OR2=1)
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_ERp_white <- calculate_perc(data=result_ERp_white, perc.u=perc.low) 
+
+## Comparison of Black and White
+ 
+  cbind.data.frame(PRS.c=perc_ERp$PRS.c, Black=perc_ERp[, c(2)]*100, White=perc_ERp_white$Total*100)
+ 
+  data1 <- rbind.data.frame(cbind.data.frame(Race="African American", risk80B=result_ERp$risk80B), 
+                            cbind.data.frame(Race="European American", risk80B=result_ERp_white$risk80B))
+  table1(~ risk80B | Race, data=data1, caption="ER+ BC risk by race: Age 20-80", overall=F)
+
+table(data1$risk80B>0.40, data1$Race)  
+data1$risk80 <- data1$risk80B*100 
+data1$risk80[data1$risk80>40] <- 40
+
+ ggplot(data1, aes(x = risk80, fill = Race)) +
+  geom_density(alpha = 0.4) +
+  labs(
+       x = "Lifetime risk of ER-positive breast cancer (%)",
+       y = "Density", 
+       fill="Race") +
+  scale_x_continuous(breaks = seq(0, 40, by = 5)) +
+  theme_minimal() + theme_classic() + theme(legend.position = c(.80, .85))
+ 
+ ggsave("G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Density_BlackWhite_LT_ERPOS.png", width = 5, height = 3.5, dpi = 1200)
+ 
+```
+### ER- BC in Black and White
+```{r}
+## Blacks
+age_black_ERn 
+rate_inc <- cbind(c(0:89),  c(rep(0,20), age_black_ERn1[,2]) )
+rate_mort <- cbind(c(0:89), c(rep(0,20), age_black_ERn1[,3]) )
+
+result_ERn <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, startAge=20, interval=60, OR1=1.491039, OR2=1)
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_ERn <- calculate_perc(data=result_ERn, perc.u=perc.low) 
+
+## White
+age_white_ERn
+rate_inc <- cbind(c(0:89),  c(rep(0,20), age_white_ERn1[,2]) )
+rate_mort <- cbind(c(0:89), c(rep(0,20), age_white_ERn1[,3]) )
+
+result_ERn_white <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, startAge=20, interval=60, OR1=1.45, OR2=1)
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_ERn_white <- calculate_perc(data=result_ERn_white, perc.u=perc.low) 
+
+## Comparison of Black and White
+ 
+  cbind.data.frame(PRS.c=perc_ERn$PRS.c, Black=perc_ERn[, c(2)]*100, White=perc_ERn_white$Total*100)
+ 
+  data1 <- rbind.data.frame(cbind.data.frame(Race="African American", risk80B=result_ERn$risk80B), 
+                            cbind.data.frame(Race="European American", risk80B=result_ERn_white$risk80B))
+  table1(~ risk80B | Race, data=data1, caption="ER- BC risk by race: Age 20-80", overall=F)
+
+table(data1$risk80B>0.12, data1$Race)  
+data1$risk80 <- data1$risk80B*100 
+data1$risk80[data1$risk80>12] <- 12
+
+ ggplot(data1, aes(x = risk80, fill = Race)) +
+  geom_density(alpha = 0.4) +
+  labs(
+       x = "Lifetime risk of ER-negative breast cancer (%)",
+       y = "Density", 
+       fill="Race") +
+  scale_x_continuous(breaks = seq(0, 12, by = 2)) +
+  theme_minimal() + theme_classic() + theme(legend.position = c(.80, .85))
+ 
+ ggsave("G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Density_BlackWhite_LT_ERNEG.png", width = 5, height = 3.5, dpi = 1200)
+ 
+``` 
+ 
+### TNBC in Black and White
+```{r}
+## Blacks
+age_black_TNBC 
+rate_inc <- cbind(c(0:89),  c(rep(0,20), age_black_TNBC1[,2]) )
+rate_mort <- cbind(c(0:89), c(rep(0,20), age_black_TNBC1[,3]) )
+
+result_TNBC <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, startAge=20, interval=60, OR1=1.653526, OR2=1)
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_TNBC <- calculate_perc(data=result_TNBC, perc.u=perc.low) 
+
+## White
+age_white_TNBC
+rate_inc <- cbind(c(0:89),  c(rep(0,20), age_white_TNBC1[,2]) )
+rate_mort <- cbind(c(0:89), c(rep(0,20), age_white_TNBC1[,3]) )
+
+result_TNBC_white <- calculate_LT_risk(bc_inc= rate_inc, mort_inc=rate_mort, startAge=20, interval=60, OR1=1.65, OR2=1)
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc_TNBC_white <- calculate_perc(data=result_TNBC_white, perc.u=perc.low) 
+
+## Comparison of Black and White
+ 
+  cbind.data.frame(PRS.c=perc_TNBC$PRS.c, Black=perc_TNBC[, c(2)]*100, White=perc_TNBC_white$Total*100)
+ 
+  data1 <- rbind.data.frame(cbind.data.frame(Race="African American", risk80B=result_TNBC$risk80B), 
+                            cbind.data.frame(Race="European American", risk80B=result_TNBC_white$risk80B))
+  table1(~ risk80B | Race, data=data1, caption="TNBC risk by race: Age 20-80", overall=F)
+
+table(data1$risk80B>0.10, data1$Race)  
+data1$risk80 <- data1$risk80B*100 
+data1$risk80[data1$risk80>10] <- 10
+
+ ggplot(data1, aes(x = risk80, fill = Race)) +
+  geom_density(alpha = 0.4) +
+  labs(
+       x = "Lifetime risk of triple negative breast cancer (%)",
+       y = "Density", 
+       fill="Race") +
+  scale_x_continuous(breaks = seq(0, 10, by = 2)) +
+  theme_minimal() + theme_classic() + theme(legend.position = c(.80, .85))
+ 
+ ggsave("G:/BCAC/james.li/PRS_AABCG/output/LT_RISK_OUTPUT/Density_BlackWhite_LT_TNBC.png", width = 5, height = 3.5, dpi = 1200)
+ 
+``` 
+
+## [Method 1] Absolute Risk Calculation, theoritical methods
+To calculate 10-year risk for a 40, 45, and 50 years old AA. 
+Base on ACS screening guideline, mammogram is recommended to start at age 45, so the average 10-year risk for a 45 years old can be a threshold for screening. 
+It was 2.1% for African Americans and 2.3% for European Americans. We may take 2.2% for the entire population. 
+
+### [Step 1] Define the function.
+```{r}
+calculate_lifetime_risk <- function(sigma, ShortTime, rate_inc, rate_mor, Ystart, perc.u, perc.v) {
+  
+  # Calculate PRS frequency
+  prs_freq <- perc.v - perc.u 
+  
+  # Calculate sigma
+  print(sigma)
+  
+  # Calculate odds ratio
+  OR <- (0.6 - 0.4) * (pnorm(qnorm(1 - perc.u) + sigma) - pnorm(qnorm(1 - perc.v) + sigma)) / 
+    (perc.v - perc.u) / (pnorm(qnorm(0.6) + sigma) - pnorm(qnorm(0.4) + sigma)) 
+  
+  # Create a data frame for odds ratio
+  ORstring <- data.frame(
+    g = 1:length(OR),
+    prs_cat = paste0(perc.u * 100, "-", perc.v * 100, "%"),
+    prs_freq,
+    OR
+  )
+  
+  # Print odds ratio per percentiles
+  cat("Odds ratio per percentiles:\n")
+  print(ORstring[, 2:4])
+  
+  Row <- length(OR)
+  Col <- 81 - Ystart
+  
+  # Initialize matrices
+  S_g <- matrix(, nrow = Row, ncol = Col)  ## BC-free matrix; row for category, column for age
+  S_g[, 1] <- rep(1, Row) 
+  AR_g_adj <- matrix(, nrow = Row, ncol = Col)  ## Cumulative risk matrix adjusted for competing risk
+  AR_g_adj[, 1] <- rep(0, Row)
+  # Cumulative risk matrix without competing risk, by the end of time period and the beginning of time period t+1. 
+  AR <- matrix(, nrow = Row, ncol = Col)  ##  consideration
+  AR[, 1] <- rep(0, Row)
+  mu_0 <- numeric(Col)  ## Breast cancer hazard of baseline PRS category for each age
+  S_m <- matrix(, nrow = Row, ncol = Col)  ## Survival from other diseases
+  mortality <- matrix(, nrow = Row, ncol = Col) ## Mortality from other diseases
+  S_m[, 1] <- rep(1, Row) 
+  
+  # Calculate risk matrices
+  for (t in 1:(Col - 1)) {
+    i_t <- rate_inc[t + Ystart - 20]   ## BC incidence
+    mu_0[t] <- solve(sum(prs_freq * OR * S_g[, t]) / sum(prs_freq * S_g[, t]), i_t)
+    S_g[, t + 1] <- S_g[, t] * (1 - mu_0[t] * OR)
+    mortality[, t] <- rep(rate_mor[t + Ystart - 20], Row) 
+    S_m[, t + 1] <- S_m[, t] * (1 - mortality[, t])
+  }
+  
+  for (t in 1:(Col - 1)) {
+    AR_g_adj[, t + 1] <- mu_0[t] * OR * S_g[, t] * S_m[, t] + AR_g_adj[, t] 
+    AR[, t + 1] <- mu_0[t] * OR * S_g[, t] + AR[, t]  
+  }
+  
+  rownames(AR) <- ORstring$prs_cat
+  colnames(AR) <- Ystart:80
+  AR_t <- t(AR * 100)
+  cat(paste0("Cumulative risk from age ", Ystart, " to 80, without competing risk consideration: \n"))
+  print(AR_t[nrow(AR_t), ], digits = 3)
+  
+  rownames(AR_g_adj) <- ORstring$prs_cat
+  colnames(AR_g_adj) <- Ystart:80
+  LT_risk <- t(AR_g_adj * 100)
+  cat(paste0("Cumulative risk from age ", Ystart, " to 80, considering competing risk: \n"))
+  print(LT_risk[nrow(LT_risk), ], digits = 3)
+  
+  # Calculate 5-year risk
+  AR_ten <- matrix(, nrow = Row, ncol = (Col - ShortTime))
+  for (t in 1:(Col - ShortTime)) {
+    AR_ten[, t] <- (AR_g_adj[, t + ShortTime] - AR_g_adj[, t]) / (S_g[, t] * S_m[, t])
+  }
+  rownames(AR_ten) <- ORstring$prs_cat
+  colnames(AR_ten) <- Ystart:(80 - ShortTime)
+  Risk_5y <- t(AR_ten * 100)
+  cat(paste0(ShortTime, "-year risk for women aged ", Ystart, ": \n")) 
+  print(Risk_5y[1, ], digits = 3)
+  
+  # Combine results into a list
+  risk_combine <- list(LT_risk, Risk_5y) 
+  return(risk_combine)  
+}
+
+```
+
+### [Step 2] Risk Calculation
+#### Overall cancer risk, only based on age, not PRS 
+```{r}
+## Black
+perc.low <-c(0, 1, 5, 10, 20, 40, 60, 80, 90, 95, 99)/100
+perc.high <- c(perc.low[-1], 1)
+  # qnorm(0.626) * sqrt(2)
+  # 0.48567
+
+result_black <- calculate_lifetime_risk(sigma=0, Ystart=20, ShortTime=10,
+                                        rate_inc= age_black1[,2], rate_mor= age_black1[,3],  
+                                        perc.u= perc.low, perc.v= perc.high)
+print("Cumulative risk from age 20 to 80 is the same across PRS category as OR=1") 
+as.data.frame(result_black[1])[61,] 
+print("10 year risk for women ages 40, 45, and 50") 
+ out.black <- cbind(Age=as.numeric(row.names(as.data.frame(result_black[2]))), as.data.frame(result_black[2])) 
+ out.black[c(21,26,31), c(1:2)] 
+ 
+
+## White
+result_white <- calculate_lifetime_risk(sigma=0, Ystart=20, ShortTime=10,
+                                        rate_inc= age_white1[,2], rate_mor= age_white1[,3],  
+                                        perc.u= perc.low, perc.v= perc.high)
+print("Cumulative risk from age 20 to 80 is the same across PRS category as OR=1") 
+as.data.frame(result_white[1])[61,] 
+print("10 year risk for women ages 40, 45, and 50") 
+ out.white <- cbind(Age=as.numeric(row.names(as.data.frame(result_white[2]))), as.data.frame(result_white[2])) 
+ out.white[c(21,26,31), c(1:2)] 
